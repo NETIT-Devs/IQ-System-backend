@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 
 const express = require("express");
@@ -25,6 +24,22 @@ app.get("/", (req, res) => {
 // Authentication routes
 app.use("/api/auth", authRoutes);
 
+console.log(
+  "Registered auth routes:",
+  authRoutes.stack
+    .filter((layer) => layer.route)
+    .map((layer) => ({
+      path: `/api/auth${layer.route.path}`,
+      methods: Object.keys(layer.route.methods),
+    }))
+);
+
+// Debug middleware
+app.use("/api/auth", (req, res, next) => {
+  console.log("AUTH DEBUG:", req.method, req.originalUrl);
+  next();
+});
+
 // Customer routes
 app.use("/api/customers", customerRoutes);
 
@@ -38,6 +53,8 @@ app.get("/api/customers/test", (req, res) => {
 
 // Handle unknown routes
 app.use((req, res) => {
+  console.log("404 DEBUG:", req.method, req.originalUrl);
+
   res.status(404).json({
     success: false,
     message: `Route not found: ${req.method} ${req.originalUrl}`,
