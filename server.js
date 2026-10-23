@@ -6,6 +6,7 @@ const db = require("./config/db");
 
 const authRoutes = require("./routes/authRoutes");
 const customerRoutes = require("./routes/customerRoutes");
+const quotationRoutes = require("./routes/quotationRoutes");
 
 const app = express();
 
@@ -42,6 +43,7 @@ app.use("/api/auth", (req, res, next) => {
 
 // Customer routes
 app.use("/api/customers", customerRoutes);
+app.use("/api/quotations", quotationRoutes);
 
 // Temporary customer route test
 app.get("/api/customers/test", (req, res) => {
