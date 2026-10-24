@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const express = require("express");
@@ -43,6 +44,10 @@ app.use("/api/auth", (req, res, next) => {
 
 // Customer routes
 app.use("/api/customers", customerRoutes);
+
+
+
+// Quotation routes
 app.use("/api/quotations", quotationRoutes);
 
 // Temporary customer route test
