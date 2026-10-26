@@ -1,19 +1,29 @@
-
 require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 const db = require("./config/db");
 
+// Route imports
 const authRoutes = require("./routes/authRoutes");
 const customerRoutes = require("./routes/customerRoutes");
 const quotationRoutes = require("./routes/quotationRoutes");
+const companySettingsRoutes = require("./routes/companySettingsRoutes");
+const superAdminDashboardRoutes = require("./routes/superAdminDashboardRoutes");
+const adminDashboardRoutes = require('./routes/adminDashboardRoutes');
 
 const app = express();
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Serve uploaded company logo and signature images
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "uploads"))
+);
 
 // Health check route
 app.get("/", (req, res) => {
@@ -36,7 +46,7 @@ console.log(
     }))
 );
 
-// Debug middleware
+// Debug middleware for authentication requests
 app.use("/api/auth", (req, res, next) => {
   console.log("AUTH DEBUG:", req.method, req.originalUrl);
   next();
@@ -45,10 +55,17 @@ app.use("/api/auth", (req, res, next) => {
 // Customer routes
 app.use("/api/customers", customerRoutes);
 
-
-
 // Quotation routes
 app.use("/api/quotations", quotationRoutes);
+
+// Company settings routes
+app.use("/api/company-settings", companySettingsRoutes);
+
+// Super Admin Dashboard routes
+app.use("/api/super-admin/dashboard", superAdminDashboardRoutes);
+
+// Admin Dashboard routes
+app.use('/api/admin/dashboard', adminDashboardRoutes);
 
 // Temporary customer route test
 app.get("/api/customers/test", (req, res) => {

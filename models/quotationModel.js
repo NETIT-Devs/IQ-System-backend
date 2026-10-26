@@ -1,9 +1,111 @@
 
 const db = require("../config/db");
 
-// Get all quotations with their items
-async function getAllQuotations() {
-  const [rows] = await db.execute(`
+// Validate optional filters
+function buildQuotationFilters(filters = {}) {
+  const conditions = [];
+  const params = [];
+
+  const allowedStatuses = [
+    "Draft",
+    "Sent",
+    "Approved",
+    "Rejected",
+    "Expired",
+    "Cancelled",
+  ];
+
+  const allowedApprovalStatuses = [
+    "Not Required",
+    "Pending",
+    "Approved",
+    "Rejected",
+  ];
+
+  const { period, status, approval_status, search, from_date, to_date } =
+    filters;
+
+  if (period && period !== "all") {
+    const periodMap = {
+      "1w": "7 DAY",
+      "1m": "1 MONTH",
+      "1y": "1 YEAR",
+      "2y": "2 YEAR",
+    };
+
+    if (!periodMap[period]) {
+      throw new Error("Invalid date period.");
+    }
+
+    conditions.push(
+      `q.quotation_date >= DATE_SUB(CURDATE(), INTERVAL ${periodMap[period]})`
+    );
+  }
+
+  if (from_date || to_date) {
+    if (
+      (from_date && !/^\d{4}-\d{2}-\d{2}$/.test(from_date)) ||
+      (to_date && !/^\d{4}-\d{2}-\d{2}$/.test(to_date))
+    ) {
+      throw new Error("Dates must use YYYY-MM-DD format.");
+    }
+
+    if (from_date && to_date && from_date > to_date) {
+      throw new Error("From date cannot be after to date.");
+    }
+
+    if (from_date) {
+      conditions.push("q.quotation_date >= ?");
+      params.push(from_date);
+    }
+
+    if (to_date) {
+      conditions.push("q.quotation_date <= ?");
+      params.push(to_date);
+    }
+  }
+
+  if (status) {
+    if (!allowedStatuses.includes(status)) {
+      throw new Error("Invalid quotation status.");
+    }
+
+    conditions.push("q.status = ?");
+    params.push(status);
+  }
+
+  if (approval_status) {
+    if (!allowedApprovalStatuses.includes(approval_status)) {
+      throw new Error("Invalid approval status.");
+    }
+
+    conditions.push("q.approval_status = ?");
+    params.push(approval_status);
+  }
+
+  if (search && String(search).trim()) {
+    conditions.push(
+      "(q.quotation_number LIKE ? OR c.customer_name LIKE ?)"
+    );
+
+    const searchTerm = `%${String(search).trim()}%`;
+    params.push(searchTerm, searchTerm);
+  }
+
+  return {
+    where: conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "",
+    params,
+  };
+}
+
+// Get all quotations with filters and their items
+async function getAllQuotations(filters = {}) {
+  const { where, params } = buildQuotationFilters(filters);
+
+  const [rows] = await db.execute(
+    `
     SELECT
       q.quotation_id,
       q.quotation_number,
@@ -21,6 +123,8 @@ async function getAllQuotations() {
       q.discount_amount,
       q.tax_amount,
       q.total_amount,
+      q.status,
+      q.approval_status,
       q.notes,
       q.terms_and_conditions,
       q.created_at,
@@ -28,8 +132,11 @@ async function getAllQuotations() {
     FROM quotations q
     INNER JOIN customers c
       ON q.customer_id = c.customer_id
+    ${where}
     ORDER BY q.quotation_id DESC
-  `);
+    `,
+    params
+  );
 
   for (const quotation of rows) {
     const [items] = await db.execute(
@@ -77,6 +184,8 @@ async function getQuotationById(quotationId) {
       q.discount_amount,
       q.tax_amount,
       q.total_amount,
+      q.status,
+      q.approval_status,
       q.notes,
       q.terms_and_conditions,
       q.created_at,
@@ -142,9 +251,11 @@ async function createQuotationWithItems(quotation, items) {
         discount_amount,
         tax_amount,
         total_amount,
+        status,
+        approval_status,
         notes,
         terms_and_conditions
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         quotation.quotation_number,
         quotation.customer_id,
@@ -160,6 +271,8 @@ async function createQuotationWithItems(quotation, items) {
         quotation.discount_amount,
         quotation.tax_amount,
         quotation.total_amount,
+        quotation.status || "Draft",
+        quotation.approval_status || "Not Required",
         quotation.notes || null,
         quotation.terms_and_conditions || null,
       ]
@@ -170,7 +283,6 @@ async function createQuotationWithItems(quotation, items) {
     for (const item of items) {
       const unitPrice = Number(item.unit_price);
       const taxRate = Number(item.tax_rate ?? 0);
-
       const lineTotal = Number(
         (unitPrice + (unitPrice * taxRate) / 100).toFixed(2)
       );
@@ -246,6 +358,8 @@ async function updateQuotationWithItems(quotationId, quotation, items) {
            discount_amount = ?,
            tax_amount = ?,
            total_amount = ?,
+           status = ?,
+           approval_status = ?,
            notes = ?,
            terms_and_conditions = ?
        WHERE quotation_id = ?`,
@@ -263,6 +377,8 @@ async function updateQuotationWithItems(quotationId, quotation, items) {
         quotation.discount_amount,
         quotation.tax_amount,
         quotation.total_amount,
+        quotation.status || "Draft",
+        quotation.approval_status || "Not Required",
         quotation.notes || null,
         quotation.terms_and_conditions || null,
         quotationId,
@@ -270,15 +386,13 @@ async function updateQuotationWithItems(quotationId, quotation, items) {
     );
 
     await connection.execute(
-      `DELETE FROM quotation_items
-       WHERE quotation_id = ?`,
+      `DELETE FROM quotation_items WHERE quotation_id = ?`,
       [quotationId]
     );
 
     for (const item of items) {
       const unitPrice = Number(item.unit_price);
       const taxRate = Number(item.tax_rate ?? 0);
-
       const lineTotal = Number(
         (unitPrice + (unitPrice * taxRate) / 100).toFixed(2)
       );
@@ -339,7 +453,6 @@ async function deleteQuotationById(quotationId) {
       return { deleted: false, reason: "not_found" };
     }
 
-    // Prevent deletion if an invoice is linked
     const [invoices] = await connection.execute(
       `SELECT invoice_id
        FROM invoices
@@ -354,14 +467,12 @@ async function deleteQuotationById(quotationId) {
     }
 
     await connection.execute(
-      `DELETE FROM quotation_items
-       WHERE quotation_id = ?`,
+      `DELETE FROM quotation_items WHERE quotation_id = ?`,
       [quotationId]
     );
 
     await connection.execute(
-      `DELETE FROM quotations
-       WHERE quotation_id = ?`,
+      `DELETE FROM quotations WHERE quotation_id = ?`,
       [quotationId]
     );
 

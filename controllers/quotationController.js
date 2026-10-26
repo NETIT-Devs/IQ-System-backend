@@ -1,4 +1,6 @@
 
+const db = require("../config/db");
+
 const {
   getAllQuotations,
   getQuotationById,
@@ -6,48 +8,52 @@ const {
   updateQuotationWithItems,
   deleteQuotationById,
 } = require("../models/quotationModel");
-
 const { getActiveServices } = require("../models/serviceCatalogModel");
 
-// Validate YYYY-MM-DD dates
-function isValidDate(date) {
-  if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    return false;
-  }
 
-  const parsed = new Date(`${date}T00:00:00Z`);
+// --------------------------------------------------
+// Helpers
+// --------------------------------------------------
+
+function isValidDate(value) {
+  if (!value || typeof value !== "string") return false;
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+
+  const date = new Date(`${value}T00:00:00.000Z`);
 
   return (
-    !Number.isNaN(parsed.getTime()) &&
-    parsed.toISOString().slice(0, 10) === date
+    !Number.isNaN(date.getTime()) &&
+    date.toISOString().slice(0, 10) === value
   );
 }
 
-// Calculate project completion date from start date and duration
 function addProjectDuration(startDate, duration, unit) {
-  const date = new Date(`${startDate}T00:00:00Z`);
+  if (!startDate || duration === null || duration === undefined || duration === "") {
+    return null;
+  }
+
+  const amount = Number(duration);
+
+  if (!Number.isFinite(amount) || amount < 0) return null;
+
+  const date = new Date(`${startDate}T00:00:00.000Z`);
+
+  if (Number.isNaN(date.getTime())) return null;
 
   if (unit === "Days") {
-    date.setUTCDate(date.getUTCDate() + duration);
+    date.setUTCDate(date.getUTCDate() + amount);
   } else if (unit === "Weeks") {
-    date.setUTCDate(date.getUTCDate() + duration * 7);
+    date.setUTCDate(date.getUTCDate() + amount * 7);
   } else if (unit === "Months") {
-    const originalDay = date.getUTCDate();
-
-    date.setUTCDate(1);
-    date.setUTCMonth(date.getUTCMonth() + duration);
-
-    const lastDay = new Date(
-      Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)
-    ).getUTCDate();
-
-    date.setUTCDate(Math.min(originalDay, lastDay));
+    date.setUTCMonth(date.getUTCMonth() + amount);
+  } else {
+    return null;
   }
 
   return date.toISOString().slice(0, 10);
 }
 
-// Validate quotation data and calculate totals
 function validateQuotationData(body) {
   const {
     quotation_number,
@@ -62,346 +68,292 @@ function validateQuotationData(body) {
     notes,
     terms_and_conditions,
     items,
+    status,
+    approval_status,
   } = body || {};
 
+  const errors = [];
+
   if (
+    !quotation_number ||
     typeof quotation_number !== "string" ||
     !quotation_number.trim()
   ) {
-    return { error: "Quotation number is required." };
+    errors.push("Quotation number is required.");
   }
 
-  if (quotation_number.trim().length > 50) {
-    return { error: "Quotation number cannot exceed 50 characters." };
-  }
-
-  const customerId = Number(customer_id);
-
-  if (!Number.isSafeInteger(customerId) || customerId <= 0) {
-    return { error: "A valid customer ID is required." };
+  if (
+    !customer_id ||
+    !Number.isInteger(Number(customer_id)) ||
+    Number(customer_id) <= 0
+  ) {
+    errors.push("A valid customer ID is required.");
   }
 
   if (!isValidDate(quotation_date)) {
-    return {
-      error: "A valid quotation date (YYYY-MM-DD) is required.",
-    };
+    errors.push("A valid quotation date is required (YYYY-MM-DD).");
   }
 
-  const projectStartDate =
-    project_start_date == null || project_start_date === ""
-      ? quotation_date
-      : project_start_date;
+  if (project_start_date && !isValidDate(project_start_date)) {
+    errors.push("Project start date must use YYYY-MM-DD format.");
+  }
 
-  if (!isValidDate(projectStartDate)) {
-    return {
-      error: "A valid project start date (YYYY-MM-DD) is required.",
-    };
+  if (valid_until && !isValidDate(valid_until)) {
+    errors.push("Valid until date must use YYYY-MM-DD format.");
+  }
+
+  const allowedStatuses = [
+    "Draft",
+    "Sent",
+    "Approved",
+    "Rejected",
+    "Expired",
+    "Cancelled",
+  ];
+
+  const allowedApprovalStatuses = [
+    "Not Required",
+    "Pending",
+    "Approved",
+    "Rejected",
+  ];
+
+  if (status && !allowedStatuses.includes(status)) {
+    errors.push("Invalid quotation status.");
+  }
+
+  if (approval_status && !allowedApprovalStatuses.includes(approval_status)) {
+    errors.push("Invalid approval status.");
+  }
+
+  let duration = null;
+
+  if (
+    estimated_duration !== undefined &&
+    estimated_duration !== null &&
+    estimated_duration !== ""
+  ) {
+    duration = Number(estimated_duration);
+
+    if (!Number.isFinite(duration) || duration < 0) {
+      errors.push("Estimated duration must be a non-negative number.");
+    }
   }
 
   if (
-    valid_until != null &&
-    valid_until !== "" &&
-    !isValidDate(valid_until)
+    duration !== null &&
+    !["Days", "Weeks", "Months"].includes(duration_unit)
   ) {
-    return { error: "A valid expiry date (YYYY-MM-DD) is required." };
-  }
-
-  if (valid_until && valid_until < quotation_date) {
-    return {
-      error: "Expiry date cannot be before the quotation date.",
-    };
+    errors.push("Duration unit must be Days, Weeks, or Months.");
   }
 
   if (
-    currency != null &&
-    (typeof currency !== "string" ||
-      !/^[A-Za-z]{3}$/.test(currency))
+    duration === null &&
+    duration_unit &&
+    !["Days", "Weeks", "Months"].includes(duration_unit)
   ) {
-    return { error: "Currency must be a 3-letter code." };
+    errors.push("Invalid duration unit.");
   }
 
-  const discountInput = discount_amount ?? 0;
-  const discount = Number(discountInput);
+  const normalizedCurrency = String(currency || "LKR").trim().toUpperCase();
 
-  if (
-    String(discountInput).trim() === "" ||
-    !Number.isFinite(discount) ||
-    discount < 0 ||
-    !/^\d+(\.\d{1,2})?$/.test(String(discountInput))
-  ) {
-    return {
-      error:
-        "Discount must be a non-negative amount with up to 2 decimal places.",
-    };
+  if (!/^[A-Z]{3}$/.test(normalizedCurrency)) {
+    errors.push("Currency must be a valid three-letter currency code.");
   }
 
-  // Duration and duration unit must be supplied together.
-  const hasDuration =
-    estimated_duration != null &&
-    String(estimated_duration).trim() !== "";
+  const discount = Number(discount_amount ?? 0);
 
-  const hasDurationUnit =
-    typeof duration_unit === "string" &&
-    duration_unit.trim() !== "";
-
-  let projectDuration = null;
-  let projectDurationUnit = null;
-  let estimatedCompletionDate = null;
-
-  if (hasDuration || hasDurationUnit) {
-    if (!hasDuration || !hasDurationUnit) {
-      return {
-        error: "Select both project duration and duration unit.",
-      };
-    }
-
-    projectDuration = Number(estimated_duration);
-
-    if (
-      !Number.isSafeInteger(projectDuration) ||
-      projectDuration <= 0 ||
-      projectDuration > 3650
-    ) {
-      return {
-        error:
-          "Project duration must be a whole number between 1 and 3650.",
-      };
-    }
-
-    if (!["Days", "Weeks", "Months"].includes(duration_unit)) {
-      return {
-        error: "Duration unit must be Days, Weeks, or Months.",
-      };
-    }
-
-    projectDurationUnit = duration_unit;
-
-    estimatedCompletionDate = addProjectDuration(
-      projectStartDate,
-      projectDuration,
-      projectDurationUnit
-    );
+  if (!Number.isFinite(discount) || discount < 0) {
+    errors.push("Discount amount must be a non-negative number.");
   }
 
   if (!Array.isArray(items) || items.length === 0) {
-    return { error: "Add at least one service to the quotation." };
-  }
-
-  if (items.length > 100) {
-    return {
-      error: "A quotation cannot contain more than 100 items.",
-    };
+    errors.push("At least one quotation item is required.");
   }
 
   let subtotal = 0;
-  let taxAmount = 0;
-  const validatedItems = [];
+  let totalTax = 0;
+  const normalizedItems = [];
 
-  for (const item of items) {
-    if (
-      !item ||
-      typeof item.item_name !== "string" ||
-      !item.item_name.trim()
-    ) {
-      return { error: "Each service requires an item name." };
-    }
+  if (Array.isArray(items)) {
+    items.forEach((item, index) => {
+      const itemName = String(item?.item_name || "").trim();
+      const unitPrice = Number(item?.unit_price);
+      const taxRate = Number(item?.tax_rate ?? 0);
 
-    const itemName = item.item_name.trim();
+      if (!itemName) {
+        errors.push(`Item ${index + 1}: item name is required.`);
+      }
 
-    if (itemName.length > 255) {
-      return { error: "Service name cannot exceed 255 characters." };
-    }
+      if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+        errors.push(`Item ${index + 1}: unit price must be non-negative.`);
+      }
 
-    // One service line = one price. Quantity is not used.
-    const unitPrice = Number(item.unit_price);
+      if (
+        !Number.isFinite(taxRate) ||
+        taxRate < 0 ||
+        taxRate > 100
+      ) {
+        errors.push(`Item ${index + 1}: tax rate must be between 0 and 100.`);
+      }
 
-    if (
-      item.unit_price == null ||
-      String(item.unit_price).trim() === "" ||
-      !Number.isFinite(unitPrice) ||
-      unitPrice < 0 ||
-      !/^\d+(\.\d{1,2})?$/.test(String(item.unit_price))
-    ) {
-      return {
-        error: "Price must be non-negative with up to 2 decimal places.",
-      };
-    }
+      if (
+        itemName &&
+        Number.isFinite(unitPrice) &&
+        unitPrice >= 0 &&
+        Number.isFinite(taxRate) &&
+        taxRate >= 0 &&
+        taxRate <= 100
+      ) {
+        const lineTax = (unitPrice * taxRate) / 100;
+        const lineTotal = Number((unitPrice + lineTax).toFixed(2));
 
-    const taxInput = item.tax_rate ?? 0;
-    const taxRate = Number(taxInput);
+        subtotal += unitPrice;
+        totalTax += lineTax;
 
-    if (
-      !Number.isFinite(taxRate) ||
-      taxRate < 0 ||
-      taxRate > 100 ||
-      !/^\d+(\.\d{1,2})?$/.test(String(taxInput))
-    ) {
-      return { error: "Tax rate must be between 0 and 100." };
-    }
-
-    if (
-      item.description != null &&
-      typeof item.description !== "string"
-    ) {
-      return { error: "Description must be text." };
-    }
-
-    if (
-      typeof item.description === "string" &&
-      item.description.length > 10000
-    ) {
-      return { error: "Description cannot exceed 10000 characters." };
-    }
-
-    const technology = item.technology ?? null;
-
-    if (
-      technology != null &&
-      (typeof technology !== "string" ||
-        technology.trim().length > 100)
-    ) {
-      return { error: "Technology must be text up to 100 characters." };
-    }
-
-    const websiteType = item.website_type ?? null;
-
-    if (
-      websiteType != null &&
-      (typeof websiteType !== "string" ||
-        websiteType.trim().length > 150)
-    ) {
-      return {
-        error: "Website type must be text up to 150 characters.",
-      };
-    }
-
-    const hostingDomain = item.hosting_domain ?? null;
-
-    if (
-      hostingDomain != null &&
-      (typeof hostingDomain !== "string" ||
-        hostingDomain.trim().length > 1000)
-    ) {
-      return {
-        error:
-          "Hosting and domain details must be text up to 1000 characters.",
-      };
-    }
-
-    const baseAmount = Number(unitPrice.toFixed(2));
-    const itemTax = Number(((baseAmount * taxRate) / 100).toFixed(2));
-
-    subtotal += baseAmount;
-    taxAmount += itemTax;
-
-    validatedItems.push({
-      item_name: itemName,
-      description: item.description?.trim() || null,
-      unit_price: baseAmount,
-      tax_rate: taxRate,
-      technology:
-        typeof technology === "string"
-          ? technology.trim() || null
-          : null,
-      website_type:
-        typeof websiteType === "string"
-          ? websiteType.trim() || null
-          : null,
-      hosting_domain:
-        typeof hostingDomain === "string"
-          ? hostingDomain.trim() || null
-          : null,
+        normalizedItems.push({
+          item_name: itemName,
+          description: item.description || null,
+          technology: item.technology || null,
+          website_type: item.website_type || null,
+          hosting_domain: item.hosting_domain || null,
+          unit_price: Number(unitPrice.toFixed(2)),
+          tax_rate: Number(taxRate.toFixed(2)),
+          line_total: lineTotal,
+        });
+      }
     });
   }
 
-  subtotal = Number(subtotal.toFixed(2));
-  taxAmount = Number(taxAmount.toFixed(2));
-
   if (discount > subtotal) {
-    return { error: "Discount cannot be greater than the subtotal." };
+    errors.push("Discount amount cannot exceed subtotal.");
   }
 
-  const finalDiscount = Number(discount.toFixed(2));
+  if (errors.length > 0) {
+    return { valid: false, errors };
+  }
 
-  const totalAmount = Number(
-    (subtotal - finalDiscount + taxAmount).toFixed(2)
+  subtotal = Number(subtotal.toFixed(2));
+  totalTax = Number(totalTax.toFixed(2));
+
+  const total = Number(
+    (subtotal - discount + totalTax).toFixed(2)
+  );
+
+  const startDate = project_start_date || quotation_date;
+
+  const completionDate = addProjectDuration(
+    startDate,
+    duration,
+    duration_unit
   );
 
   return {
+    valid: true,
+    items: normalizedItems,
     data: {
       quotation_number: quotation_number.trim(),
-      customer_id: customerId,
+      customer_id: Number(customer_id),
       quotation_date,
-      project_start_date: projectStartDate,
-      estimated_duration: projectDuration,
-      duration_unit: projectDurationUnit,
-      estimated_completion_date: estimatedCompletionDate,
+      project_start_date: startDate,
+      estimated_duration: duration,
+      duration_unit: duration_unit || null,
+      estimated_completion_date: completionDate,
       valid_until: valid_until || null,
-      currency: currency ? currency.toUpperCase() : "LKR",
+      currency: normalizedCurrency,
       subtotal,
-      discount_amount: finalDiscount,
-      tax_amount: taxAmount,
-      total_amount: totalAmount,
+      discount_amount: Number(discount.toFixed(2)),
+      tax_amount: totalTax,
+      total_amount: total,
+      status: status || "Draft",
+      approval_status: approval_status || "Not Required",
       notes: notes || null,
       terms_and_conditions: terms_and_conditions || null,
-    },
-    items: validatedItems,
-    totals: {
-      subtotal,
-      discount_amount: finalDiscount,
-      tax_amount: taxAmount,
-      total_amount: totalAmount,
     },
   };
 }
 
-// Get active service options
+function sendValidationErrors(res, errors) {
+  return res.status(400).json({
+    success: false,
+    message: "Quotation validation failed.",
+    errors,
+  });
+}
+
+// --------------------------------------------------
+// Get quotation item options
+// --------------------------------------------------
+
 async function getQuotationItemOptions(req, res) {
   try {
-    const items = await getActiveServices();
+    const services = await getActiveServices();
 
     return res.status(200).json({
       success: true,
-      items,
+      services,
     });
   } catch (error) {
     console.error("Get quotation item options error:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Failed to retrieve service options.",
+      message: "Failed to retrieve quotation item options.",
     });
   }
 }
 
-// Get all quotations
+// --------------------------------------------------
+// Get quotations with date/status/search filters
+// --------------------------------------------------
+
 async function getQuotations(req, res) {
   try {
-    const quotations = await getAllQuotations();
+    const {
+      period,
+      status,
+      approval_status,
+      search,
+      from_date,
+      to_date,
+    } = req.query;
+
+    const quotations = await getAllQuotations({
+      period,
+      status,
+      approval_status,
+      search,
+      from_date,
+      to_date,
+    });
 
     return res.status(200).json({
       success: true,
+      count: quotations.length,
       quotations,
     });
   } catch (error) {
     console.error("Get quotations error:", error);
 
-    return res.status(500).json({
+    return res.status(400).json({
       success: false,
-      message: "Failed to retrieve quotations.",
+      message: error.message || "Failed to retrieve quotations.",
     });
   }
 }
 
+// --------------------------------------------------
 // Get one quotation by ID
+// --------------------------------------------------
+
 async function getQuotation(req, res) {
   try {
     const quotationId = Number(req.params.id);
 
-    if (!Number.isSafeInteger(quotationId) || quotationId <= 0) {
+    if (!Number.isInteger(quotationId) || quotationId <= 0) {
       return res.status(400).json({
         success: false,
-        message: "A valid quotation ID is required.",
+        message: "Invalid quotation ID.",
       });
     }
 
@@ -414,12 +366,13 @@ async function getQuotation(req, res) {
       });
     }
 
+    // Includes status and approval_status from the model.
     return res.status(200).json({
       success: true,
       quotation,
     });
   } catch (error) {
-    console.error("Get quotation by ID error:", error);
+    console.error("Get quotation error:", error);
 
     return res.status(500).json({
       success: false,
@@ -428,24 +381,36 @@ async function getQuotation(req, res) {
   }
 }
 
+// --------------------------------------------------
 // Create quotation
+// --------------------------------------------------
+
 async function addQuotation(req, res) {
   try {
     const result = validateQuotationData(req.body);
 
-    if (result.error) {
+    if (!result.valid) {
+      return sendValidationErrors(res, result.errors);
+    }
+
+    // Do not allow the create form to self-approve a quotation.
+    const requestedStatus = result.data.status;
+
+    if (["Approved", "Rejected"].includes(requestedStatus)) {
       return res.status(400).json({
         success: false,
-        message: result.error,
+        message: "A quotation cannot be approved or rejected during creation.",
       });
     }
+
+    result.data.approval_status = "Not Required";
 
     const userId = req.user?.user_id;
 
     if (!userId) {
       return res.status(401).json({
         success: false,
-        message: "Authentication required.",
+        message: "Authenticated user information is missing.",
       });
     }
 
@@ -461,7 +426,14 @@ async function addQuotation(req, res) {
       success: true,
       message: "Quotation created successfully.",
       quotation_id: quotationId,
-      totals: result.totals,
+      status: result.data.status,
+      approval_status: result.data.approval_status,
+      totals: {
+        subtotal: result.data.subtotal,
+        discount_amount: result.data.discount_amount,
+        tax_amount: result.data.tax_amount,
+        total_amount: result.data.total_amount,
+      },
     });
   } catch (error) {
     console.error("Create quotation error:", error);
@@ -469,17 +441,7 @@ async function addQuotation(req, res) {
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
         success: false,
-        message: "Quotation number already exists.",
-      });
-    }
-
-    if (
-      error.code === "ER_NO_REFERENCED_ROW_2" ||
-      error.code === "ER_ROW_IS_REFERENCED_2"
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "The selected customer or related record does not exist.",
+        message: "This quotation number already exists.",
       });
     }
 
@@ -490,25 +452,52 @@ async function addQuotation(req, res) {
   }
 }
 
+// --------------------------------------------------
 // Update quotation
+// --------------------------------------------------
+
 async function updateQuotation(req, res) {
   try {
     const quotationId = Number(req.params.id);
 
-    if (!Number.isSafeInteger(quotationId) || quotationId <= 0) {
+    if (!Number.isInteger(quotationId) || quotationId <= 0) {
       return res.status(400).json({
         success: false,
-        message: "A valid quotation ID is required.",
+        message: "Invalid quotation ID.",
       });
     }
 
     const result = validateQuotationData(req.body);
 
-    if (result.error) {
+    if (!result.valid) {
+      return sendValidationErrors(res, result.errors);
+    }
+
+    // Approval decisions must go through the protected approval endpoint.
+    if (["Approved", "Rejected"].includes(result.data.status)) {
       return res.status(400).json({
         success: false,
-        message: result.error,
+        message: "Use the approval endpoint to approve or reject a quotation.",
       });
+    }
+
+    const existing = await getQuotationById(quotationId);
+
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: "Quotation not found.",
+      });
+    }
+
+    // Preserve an existing approval state unless the quotation is edited
+    // before approval. A pending request must be resubmitted after editing.
+    if (
+      existing.approval_status === "Pending" ||
+      existing.approval_status === "Approved" ||
+      existing.approval_status === "Rejected"
+    ) {
+      result.data.approval_status = "Not Required";
     }
 
     const updated = await updateQuotationWithItems(
@@ -527,7 +516,15 @@ async function updateQuotation(req, res) {
     return res.status(200).json({
       success: true,
       message: "Quotation updated successfully.",
-      totals: result.totals,
+      quotation_id: quotationId,
+      status: result.data.status,
+      approval_status: result.data.approval_status,
+      totals: {
+        subtotal: result.data.subtotal,
+        discount_amount: result.data.discount_amount,
+        tax_amount: result.data.tax_amount,
+        total_amount: result.data.total_amount,
+      },
     });
   } catch (error) {
     console.error("Update quotation error:", error);
@@ -535,17 +532,7 @@ async function updateQuotation(req, res) {
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
         success: false,
-        message: "Quotation number already exists.",
-      });
-    }
-
-    if (
-      error.code === "ER_NO_REFERENCED_ROW_2" ||
-      error.code === "ER_ROW_IS_REFERENCED_2"
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "The selected customer or related record does not exist.",
+        message: "This quotation number already exists.",
       });
     }
 
@@ -556,31 +543,41 @@ async function updateQuotation(req, res) {
   }
 }
 
+// --------------------------------------------------
 // Delete quotation
+// --------------------------------------------------
+
 async function deleteQuotation(req, res) {
   try {
     const quotationId = Number(req.params.id);
 
-    if (!Number.isSafeInteger(quotationId) || quotationId <= 0) {
+    if (!Number.isInteger(quotationId) || quotationId <= 0) {
       return res.status(400).json({
         success: false,
-        message: "A valid quotation ID is required.",
+        message: "Invalid quotation ID.",
       });
     }
 
     const result = await deleteQuotationById(quotationId);
 
-    if (result.reason === "not_found") {
-      return res.status(404).json({
-        success: false,
-        message: "Quotation not found.",
-      });
-    }
+    if (!result.deleted) {
+      if (result.reason === "not_found") {
+        return res.status(404).json({
+          success: false,
+          message: "Quotation not found.",
+        });
+      }
 
-    if (result.reason === "linked_invoice") {
-      return res.status(409).json({
+      if (result.reason === "linked_invoice") {
+        return res.status(409).json({
+          success: false,
+          message: "This quotation cannot be deleted because an invoice is linked to it.",
+        });
+      }
+
+      return res.status(400).json({
         success: false,
-        message: "Cannot delete a quotation linked to an invoice.",
+        message: "Quotation could not be deleted.",
       });
     }
 
@@ -598,6 +595,199 @@ async function deleteQuotation(req, res) {
   }
 }
 
+// --------------------------------------------------
+// Submit quotation for approval
+// Admin or Super Admin can submit.
+// --------------------------------------------------
+
+async function submitQuotationForApproval(req, res) {
+  try {
+    const quotationId = Number(req.params.id);
+
+    if (!Number.isInteger(quotationId) || quotationId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid quotation ID.",
+      });
+    }
+
+    const quotation = await getQuotationById(quotationId);
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: "Quotation not found.",
+      });
+    }
+
+    if (["Approved", "Rejected", "Cancelled", "Expired"].includes(quotation.status)) {
+      return res.status(400).json({
+        success: false,
+        message: "This quotation cannot be submitted for approval in its current status.",
+      });
+    }
+
+    const [result] = await db.execute(
+      `UPDATE quotations
+       SET status = 'Sent',
+           approval_status = 'Pending'
+       WHERE quotation_id = ?
+         AND approval_status <> 'Pending'`,
+      [quotationId]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(409).json({
+        success: false,
+        message: "This quotation is already pending approval.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Quotation submitted for approval successfully.",
+      quotation_id: quotationId,
+      status: "Sent",
+      approval_status: "Pending",
+    });
+  } catch (error) {
+    console.error("Submit quotation for approval error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to submit quotation for approval.",
+    });
+  }
+}
+
+// --------------------------------------------------
+// Super Admin: Approve quotation
+// --------------------------------------------------
+
+async function approveQuotation(req, res) {
+  try {
+    if (req.user?.role !== "Super Admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Only Super Admin can approve quotations.",
+      });
+    }
+
+    const quotationId = Number(req.params.id);
+
+    if (!Number.isInteger(quotationId) || quotationId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid quotation ID.",
+      });
+    }
+
+    const [result] = await db.execute(
+      `UPDATE quotations
+       SET status = 'Approved',
+           approval_status = 'Approved'
+       WHERE quotation_id = ?
+         AND approval_status = 'Pending'`,
+      [quotationId]
+    );
+
+    if (result.affectedRows === 0) {
+      const quotation = await getQuotationById(quotationId);
+
+      if (!quotation) {
+        return res.status(404).json({
+          success: false,
+          message: "Quotation not found.",
+        });
+      }
+
+      return res.status(409).json({
+        success: false,
+        message: "Only quotations pending approval can be approved.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Quotation approved successfully.",
+      quotation_id: quotationId,
+      status: "Approved",
+      approval_status: "Approved",
+    });
+  } catch (error) {
+    console.error("Approve quotation error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to approve quotation.",
+    });
+  }
+}
+
+// --------------------------------------------------
+// Super Admin: Reject quotation
+// --------------------------------------------------
+
+async function rejectQuotation(req, res) {
+  try {
+    if (req.user?.role !== "Super Admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Only Super Admin can reject quotations.",
+      });
+    }
+
+    const quotationId = Number(req.params.id);
+
+    if (!Number.isInteger(quotationId) || quotationId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid quotation ID.",
+      });
+    }
+
+    const [result] = await db.execute(
+      `UPDATE quotations
+       SET status = 'Rejected',
+           approval_status = 'Rejected'
+       WHERE quotation_id = ?
+         AND approval_status = 'Pending'`,
+      [quotationId]
+    );
+
+    if (result.affectedRows === 0) {
+      const quotation = await getQuotationById(quotationId);
+
+      if (!quotation) {
+        return res.status(404).json({
+          success: false,
+          message: "Quotation not found.",
+        });
+      }
+
+      return res.status(409).json({
+        success: false,
+        message: "Only quotations pending approval can be rejected.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Quotation rejected successfully.",
+      quotation_id: quotationId,
+      status: "Rejected",
+      approval_status: "Rejected",
+    });
+  } catch (error) {
+    console.error("Reject quotation error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to reject quotation.",
+    });
+  }
+}
+
 module.exports = {
   getQuotationItemOptions,
   getQuotations,
@@ -605,4 +795,7 @@ module.exports = {
   addQuotation,
   updateQuotation,
   deleteQuotation,
+  submitQuotationForApproval,
+  approveQuotation,
+  rejectQuotation,
 };

@@ -1,6 +1,7 @@
 
 const jwt = require("jsonwebtoken");
 
+// Verify JWT and authenticate Admin / Super Admin users
 function authMiddleware(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
@@ -12,9 +13,18 @@ function authMiddleware(req, res, next) {
       });
     }
 
-    const token = authHeader.split(" ")[1];
+    const token = authHeader.slice(7).trim();
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication token is required.",
+      });
+    }
 
     if (!process.env.JWT_SECRET) {
+      console.error("JWT_SECRET is missing from environment configuration.");
+
       return res.status(500).json({
         success: false,
         message: "Server configuration error.",
@@ -24,6 +34,7 @@ function authMiddleware(req, res, next) {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     if (
+      !decoded ||
       !decoded.user_id ||
       !["Admin", "Super Admin"].includes(decoded.role)
     ) {
@@ -38,13 +49,40 @@ function authMiddleware(req, res, next) {
       role: decoded.role,
     };
 
-    next();
+    return next();
   } catch (error) {
+    if (error.name === "TokenExpiredError") {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication token has expired. Please log in again.",
+      });
+    }
+
     return res.status(401).json({
       success: false,
-      message: "Invalid or expired authentication token.",
+      message: "Invalid authentication token.",
     });
   }
 }
 
+// Allow only Super Admin users for protected actions
+function superAdminMiddleware(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({
+      success: false,
+      message: "Authentication is required.",
+    });
+  }
+
+  if (req.user.role !== "Super Admin") {
+    return res.status(403).json({
+      success: false,
+      message: "Only Super Admin can perform this action.",
+    });
+  }
+
+  return next();
+}
+
 module.exports = authMiddleware;
+module.exports.superAdminMiddleware = superAdminMiddleware;

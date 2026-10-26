@@ -1,3 +1,4 @@
+
 const express = require("express");
 
 const {
@@ -7,36 +8,43 @@ const {
   addQuotation,
   updateQuotation,
   deleteQuotation,
+  submitQuotationForApproval,
+  approveQuotation,
+  rejectQuotation,
 } = require("../controllers/quotationController");
 
 const authMiddleware = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-// Test quotation route
-router.get("/test", (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: "Quotation route test works successfully!",
-  });
-});
+// All quotation routes require a valid JWT token.
+router.use(authMiddleware);
 
-// Get active service/item options
-router.get("/item-options", authMiddleware, getQuotationItemOptions);
+// Get quotation item/service options
+router.get("/item-options", getQuotationItemOptions);
 
-// View all quotations
-router.get("/", authMiddleware, getQuotations);
+// Get quotations with optional filters and search
+router.get("/", getQuotations);
 
-// Create a quotation
-router.post("/", authMiddleware, addQuotation);
+// Create a new quotation
+router.post("/", addQuotation);
 
-// Update a quotation by ID
-router.put("/:id", authMiddleware, updateQuotation);
+// Submit a quotation for Super Admin approval
+router.post("/:id/submit-approval", submitQuotationForApproval);
 
-// Delete a quotation by ID
-router.delete("/:id", authMiddleware, deleteQuotation);
+// Approve a pending quotation (Super Admin only)
+router.post("/:id/approve", approveQuotation);
 
-// View one quotation by ID
-router.get("/:id", authMiddleware, getQuotation);
+// Reject a pending quotation (Super Admin only)
+router.post("/:id/reject", rejectQuotation);
+
+// Get one quotation by ID
+router.get("/:id", getQuotation);
+
+// Update a quotation
+router.put("/:id", updateQuotation);
+
+// Delete a quotation
+router.delete("/:id", deleteQuotation);
 
 module.exports = router;
