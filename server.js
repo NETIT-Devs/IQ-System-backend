@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 
 const express = require("express");
@@ -14,6 +13,7 @@ const quotationRoutes = require("./routes/quotationRoutes");
 const quotationTopicRoutes = require("./routes/quotationTopicRoutes");
 const quotationTypeRoutes = require("./routes/quotationTypeRoutes");
 const companySettingsRoutes = require("./routes/companySettingsRoutes");
+const auditLogRoutes = require("./routes/auditLogRoutes");
 
 const app = express();
 
@@ -37,6 +37,7 @@ app.use("/api/quotations", quotationRoutes);
 app.use("/api/quotation-topics", quotationTopicRoutes);
 app.use("/api/quotation-types", quotationTypeRoutes);
 app.use("/api/company-settings", companySettingsRoutes);
+app.use("/api/audit-logs", auditLogRoutes);
 
 // Handle unknown routes
 app.use((req, res) => {

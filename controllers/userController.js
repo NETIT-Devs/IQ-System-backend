@@ -5,6 +5,7 @@ const {
   createUser,
   deleteAdmin,
 } = require("../models/userModel");
+const { createAuditLog } = require("../models/auditLogModel");
 
 // Create Admin account — Super Admin only
 async function createAdmin(req, res) {
@@ -43,6 +44,14 @@ async function createAdmin(req, res) {
       passwordHash,
       "Admin"
     );
+
+    await createAuditLog({
+      userId: req.user?.user_id,
+      userRole: req.user?.role,
+      action: "Admin User Created",
+      recordId: userId,
+      details: `Created Admin account for ${full_name.trim()} (${normalizedEmail}).`,
+    });
 
     return res.status(201).json({
       success: true,
@@ -99,6 +108,14 @@ async function removeAdmin(req, res) {
         message: "Admin account not found.",
       });
     }
+
+    await createAuditLog({
+      userId: req.user?.user_id,
+      userRole: req.user?.role,
+      action: "Admin User Deleted",
+      recordId: userId,
+      details: "Deleted Admin account.",
+    });
 
     return res.status(200).json({
       success: true,

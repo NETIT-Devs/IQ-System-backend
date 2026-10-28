@@ -5,7 +5,25 @@ const db = require("../config/db");
 // Get all customers
 // --------------------------------------------------
 
-async function getAllCustomers() {
+async function getAllCustomers({ search = "", period = "" } = {}) {
+  const conditions = [];
+  const params = [];
+
+  if (search) {
+    conditions.push("customer_name LIKE ?");
+    params.push(`%${search}%`);
+  }
+
+  if (period === "today") {
+    conditions.push("DATE(created_at) = CURDATE()");
+  } else if (period === "last7days") {
+    conditions.push("created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)");
+  } else if (period === "thismonth") {
+    conditions.push(
+      "created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND created_at < DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY)"
+    );
+  }
+
   const [rows] = await db.execute(
     `SELECT
        customer_id,
@@ -22,7 +40,9 @@ async function getAllCustomers() {
        created_at,
        updated_at
      FROM customers
-     ORDER BY customer_id DESC`
+     ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
+     ORDER BY customer_id DESC`,
+    params
   );
 
   return rows;
@@ -32,7 +52,11 @@ async function getAllCustomers() {
 // Create or reuse a customer
 // --------------------------------------------------
 
-async function createCustomer(customer, connection = db) {
+async function createCustomer(
+  customer,
+  connection = db,
+  { matchByNameOnly = false } = {}
+) {
   const {
     customer_name,
     company_name,
@@ -54,8 +78,21 @@ async function createCustomer(customer, connection = db) {
     throw new Error("Customer name is required.");
   }
 
+  // Prefer an existing customer with the same normalized name.
+  const [existingByName] = await connection.execute(
+    `SELECT customer_id
+     FROM customers
+     WHERE LOWER(TRIM(customer_name)) = LOWER(?)
+     LIMIT 1`,
+    [name]
+  );
+
+  if (existingByName.length > 0) {
+    return existingByName[0].customer_id;
+  }
+
   // Reuse an existing customer with the same email.
-  if (normalizedEmail) {
+  if (!matchByNameOnly && normalizedEmail) {
     const [existing] = await connection.execute(
       `SELECT customer_id
        FROM customers
@@ -70,7 +107,7 @@ async function createCustomer(customer, connection = db) {
   }
 
   // If there is no email, check phone number.
-  if (!normalizedEmail && normalizedPhone) {
+  if (!matchByNameOnly && !normalizedEmail && normalizedPhone) {
     const [existing] = await connection.execute(
       `SELECT customer_id
        FROM customers
@@ -116,6 +153,28 @@ async function createCustomer(customer, connection = db) {
   return result.insertId;
 }
 
+// Database-calculated customer overview for the customers page.
+async function getCustomerOverview() {
+  const [[customerSummary]] = await db.execute(
+    `SELECT
+       COUNT(*) AS total_customers,
+       COALESCE(SUM(DATE(created_at) = CURDATE()), 0) AS customers_added_today
+     FROM customers`
+  );
+
+  const [[quotationSummary]] = await db.execute(
+    `SELECT COUNT(*) AS accepted_quotations
+     FROM quotations
+     WHERE customer_status IN ('Customer Accepted', 'Accepted')`
+  );
+
+  return {
+    total_customers: Number(customerSummary.total_customers),
+    customers_added_today: Number(customerSummary.customers_added_today),
+    accepted_quotations: Number(quotationSummary.accepted_quotations),
+  };
+}
+
 // --------------------------------------------------
 // Get most quoted customers
 // --------------------------------------------------
@@ -151,5 +210,6 @@ async function getMostQuotedCustomers() {
 module.exports = {
   getAllCustomers,
   createCustomer,
+  getCustomerOverview,
   getMostQuotedCustomers,
 };

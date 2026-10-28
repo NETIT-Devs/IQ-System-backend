@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const { findUserByEmail } = require("../models/userModel");
 const db = require("../config/db");
 const { createEmailTransporter } = require("../config/email");
+const { createAuditLog } = require("../models/auditLogModel");
 
 async function login(req, res) {
   try {
@@ -57,6 +58,14 @@ async function login(req, res) {
       process.env.JWT_SECRET,
       { expiresIn: "1h" }
     );
+
+    await createAuditLog({
+      userId: user.user_id,
+      userName: user.full_name || user.email,
+      userRole: user.role,
+      action: "User Login",
+      details: "Signed in successfully.",
+    });
 
     return res.status(200).json({
       success: true,
@@ -171,6 +180,13 @@ async function changePassword(req, res) {
        WHERE user_id = ? AND used_at IS NULL`,
       [userId]
     );
+
+    await createAuditLog({
+      userId,
+      userRole: req.user?.role,
+      action: "Password Changed",
+      details: "Changed account password.",
+    });
 
     return res.status(200).json({
       success: true,

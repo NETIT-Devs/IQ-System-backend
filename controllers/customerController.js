@@ -1,9 +1,11 @@
 
 const {
   getAllCustomers,
+  getCustomerOverview,
   createCustomer,
   getMostQuotedCustomers,
 } = require("../models/customerModel");
+const { createAuditLog } = require("../models/auditLogModel");
 
 // --------------------------------------------------
 // Get all customers
@@ -11,12 +13,27 @@ const {
 
 async function getCustomers(req, res) {
   try {
-    const customers = await getAllCustomers();
+    const search = String(req.query.search || "").trim();
+    const period = String(req.query.period || "").trim();
+    const allowedPeriods = ["", "today", "last7days", "thismonth"];
+
+    if (!allowedPeriods.includes(period)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid period. Allowed: today, last7days, thismonth.",
+      });
+    }
+
+    const [customers, summary] = await Promise.all([
+      getAllCustomers({ search, period }),
+      getCustomerOverview(),
+    ]);
 
     return res.status(200).json({
       success: true,
       count: customers.length,
       customers,
+      summary,
     });
   } catch (error) {
     console.error("Get customers error:", error);
@@ -67,6 +84,14 @@ async function addCustomer(req, res) {
       tax_number,
       notes,
       created_by: req.user?.user_id || null,
+    });
+
+    await createAuditLog({
+      userId: req.user?.user_id,
+      userRole: req.user?.role,
+      action: "Customer Created or Reused",
+      recordId: customerId,
+      details: `Created or reused customer ${customer_name.trim()}.`,
     });
 
     return res.status(201).json({

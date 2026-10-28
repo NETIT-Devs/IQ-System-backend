@@ -130,6 +130,7 @@ async function getAllQuotations(filters = {}) {
       q.tax_amount,
       q.total_amount,
       q.status,
+      q.customer_status,
       q.approval_status,
       q.notes,
       q.terms_and_conditions,
@@ -190,6 +191,7 @@ async function getQuotationById(quotationId) {
       q.tax_amount,
       q.total_amount,
       q.status,
+      q.customer_status,
       q.approval_status,
       q.notes,
       q.terms_and_conditions,
@@ -240,39 +242,22 @@ async function createQuotationWithItems(quotation, items) {
   try {
     await connection.beginTransaction();
 
-    let customerId = quotation.customer_id;
-
-    // Reuse an explicitly selected customer if one was provided.
-    if (customerId) {
-      const [existingCustomer] = await connection.execute(
-        `SELECT customer_id
-         FROM customers
-         WHERE customer_id = ?
-         LIMIT 1`,
-        [customerId]
-      );
-
-      if (existingCustomer.length === 0) {
-        throw new Error("Selected customer was not found.");
-      }
-    } else {
-      // Otherwise create or find the customer from the quotation form.
-      customerId = await createCustomer(
-        {
-          customer_name: quotation.customer_name,
-          company_name: quotation.company_name,
-          email: quotation.email,
-          phone: quotation.phone,
-          address: quotation.address,
-          city: quotation.city,
-          country: quotation.country,
-          tax_number: quotation.tax_number,
-          notes: quotation.customer_notes,
-          created_by: quotation.created_by,
-        },
-        connection
-      );
-    }
+    const customerId = await createCustomer(
+      {
+        customer_name: quotation.customer_name,
+        company_name: quotation.company_name,
+        email: quotation.email,
+        phone: quotation.phone,
+        address: quotation.address,
+        city: quotation.city,
+        country: quotation.country,
+        tax_number: quotation.tax_number,
+        notes: quotation.customer_notes,
+        created_by: quotation.created_by,
+      },
+      connection,
+      { matchByNameOnly: true }
+    );
 
     const [result] = await connection.execute(
       `INSERT INTO quotations (
@@ -387,38 +372,22 @@ async function updateQuotationWithItems(
       return false;
     }
 
-    // If a customer ID is supplied, ensure it exists.
-    let customerId = quotation.customer_id;
-
-    if (customerId) {
-      const [customers] = await connection.execute(
-        `SELECT customer_id
-         FROM customers
-         WHERE customer_id = ?
-         LIMIT 1`,
-        [customerId]
-      );
-
-      if (customers.length === 0) {
-        throw new Error("Selected customer was not found.");
-      }
-    } else {
-      customerId = await createCustomer(
-        {
-          customer_name: quotation.customer_name,
-          company_name: quotation.company_name,
-          email: quotation.email,
-          phone: quotation.phone,
-          address: quotation.address,
-          city: quotation.city,
-          country: quotation.country,
-          tax_number: quotation.tax_number,
-          notes: quotation.customer_notes,
-          created_by: quotation.created_by,
-        },
-        connection
-      );
-    }
+    const customerId = await createCustomer(
+      {
+        customer_name: quotation.customer_name,
+        company_name: quotation.company_name,
+        email: quotation.email,
+        phone: quotation.phone,
+        address: quotation.address,
+        city: quotation.city,
+        country: quotation.country,
+        tax_number: quotation.tax_number,
+        notes: quotation.customer_notes,
+        created_by: quotation.created_by,
+      },
+      connection,
+      { matchByNameOnly: true }
+    );
 
     await connection.execute(
       `UPDATE quotations

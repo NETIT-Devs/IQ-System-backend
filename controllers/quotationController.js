@@ -1,4 +1,3 @@
-
 const db = require("../config/db");
 
 const {
@@ -10,6 +9,7 @@ const {
 } = require("../models/quotationModel");
 
 const { getActiveServices } = require("../models/serviceCatalogModel");
+const { createAuditLog } = require("../models/auditLogModel");
 
 // --------------------------------------------------
 // Helpers
@@ -100,8 +100,6 @@ function validateQuotationData(body) {
     errors.push("Quotation number is required.");
   }
 
-  // Existing customer ID is optional.
-  // If no ID is supplied, customer_name is required.
   let normalizedCustomerId = null;
 
   if (
@@ -296,15 +294,9 @@ function validateQuotationData(body) {
   return {
     valid: true,
     items: normalizedItems,
-
     data: {
       quotation_number: quotation_number.trim(),
-
-      // Customer ID may be null when customer details are supplied.
       customer_id: normalizedCustomerId,
-
-      // These fields are consumed by quotationModel.js to create
-      // or reuse a customer inside the quotation transaction.
       customer_name: customer_name?.trim() || null,
       company_name: company_name?.trim() || null,
       email: email?.trim() || null,
@@ -314,7 +306,6 @@ function validateQuotationData(body) {
       country: country?.trim() || null,
       tax_number: tax_number?.trim() || null,
       customer_notes: customer_notes?.trim() || null,
-
       quotation_date,
       project_start_date: startDate,
       estimated_duration: duration,
@@ -470,7 +461,6 @@ async function addQuotation(req, res) {
       });
     }
 
-    // New quotations must not start with a completed approval decision.
     result.data.approval_status = "Not Required";
 
     const quotationId = await createQuotationWithItems(
@@ -480,6 +470,14 @@ async function addQuotation(req, res) {
       },
       result.items
     );
+
+    await createAuditLog({
+      userId,
+      userRole: req.user.role,
+      action: "Quotation Created",
+      recordId: quotationId,
+      details: `Created quotation ${result.data.quotation_number} for ${result.data.customer_name}.`,
+    });
 
     return res.status(201).json({
       success: true,
@@ -559,8 +557,6 @@ async function updateQuotation(req, res) {
       });
     }
 
-    // Editing a quotation resets the approval state so it can be
-    // submitted again if required.
     if (
       ["Pending", "Approved", "Rejected"].includes(
         existing.approval_status
@@ -581,6 +577,14 @@ async function updateQuotation(req, res) {
         message: "Quotation not found.",
       });
     }
+
+    await createAuditLog({
+      userId: req.user?.user_id,
+      userRole: req.user?.role,
+      action: "Quotation Updated",
+      recordId: quotationId,
+      details: `Updated quotation ${result.data.quotation_number} for ${result.data.customer_name}.`,
+    });
 
     return res.status(200).json({
       success: true,
@@ -661,6 +665,14 @@ async function deleteQuotation(req, res) {
       });
     }
 
+    await createAuditLog({
+      userId: req.user?.user_id,
+      userRole: req.user?.role,
+      action: "Quotation Deleted",
+      recordId: quotationId,
+      details: "Deleted quotation.",
+    });
+
     return res.status(200).json({
       success: true,
       message: "Quotation deleted successfully.",
@@ -677,8 +689,6 @@ async function deleteQuotation(req, res) {
 
 // --------------------------------------------------
 // Submit quotation for approval
-// Admin or Super Admin can submit.
-// This endpoint does not send an email.
 // --------------------------------------------------
 
 async function submitQuotationForApproval(req, res) {
@@ -728,6 +738,14 @@ async function submitQuotationForApproval(req, res) {
         message: "This quotation is already pending approval.",
       });
     }
+
+    await createAuditLog({
+      userId: req.user?.user_id,
+      userRole: req.user?.role,
+      action: "Quotation Submitted for Approval",
+      recordId: quotationId,
+      details: `Submitted quotation ${quotation.quotation_number} for approval.`,
+    });
 
     return res.status(200).json({
       success: true,
@@ -793,6 +811,14 @@ async function approveQuotation(req, res) {
       });
     }
 
+    await createAuditLog({
+      userId: req.user?.user_id,
+      userRole: req.user?.role,
+      action: "Quotation Approved",
+      recordId: quotationId,
+      details: "Approved quotation.",
+    });
+
     return res.status(200).json({
       success: true,
       message: "Quotation approved successfully.",
@@ -857,6 +883,14 @@ async function rejectQuotation(req, res) {
       });
     }
 
+    await createAuditLog({
+      userId: req.user?.user_id,
+      userRole: req.user?.role,
+      action: "Quotation Rejected",
+      recordId: quotationId,
+      details: "Rejected quotation.",
+    });
+
     return res.status(200).json({
       success: true,
       message: "Quotation rejected successfully.",
@@ -874,6 +908,161 @@ async function rejectQuotation(req, res) {
   }
 }
 
+// --------------------------------------------------
+// Update quotation status
+// Draft and Sent only.
+// --------------------------------------------------
+
+async function updateQuotationStatus(req, res) {
+  try {
+    const quotationId = Number(req.params.id);
+    const { status } = req.body || {};
+
+    const allowedStatuses = ["Draft", "Sent"];
+
+    if (!Number.isInteger(quotationId) || quotationId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid quotation ID.",
+      });
+    }
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Status must be Draft or Sent. Use approval endpoints for Approved or Rejected.",
+      });
+    }
+
+    const quotation = await getQuotationById(quotationId);
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: "Quotation not found.",
+      });
+    }
+
+    if (
+      ["Approved", "Rejected", "Cancelled", "Expired"].includes(
+        quotation.status
+      ) ||
+      quotation.approval_status === "Pending"
+    ) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "This quotation status cannot be changed through this endpoint.",
+      });
+    }
+
+    await db.execute(
+      `UPDATE quotations
+       SET status = ?
+       WHERE quotation_id = ?`,
+      [status, quotationId]
+    );
+
+    await createAuditLog({
+      userId: req.user?.user_id,
+      userRole: req.user?.role,
+      action: "Quotation Status Updated",
+      recordId: quotationId,
+      details: `Changed quotation status from ${quotation.status} to ${status}.`,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Quotation status updated successfully.",
+      quotation_id: quotationId,
+      status,
+    });
+  } catch (error) {
+    console.error("Update quotation status error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update quotation status.",
+    });
+  }
+}
+
+// --------------------------------------------------
+// Customer: Update quotation response status
+// --------------------------------------------------
+
+async function updateCustomerQuotationStatus(req, res) {
+  try {
+    const quotationId = Number(req.params.id);
+    const { customer_status: customerStatus } = req.body || {};
+
+    const allowedStatuses = [
+      "Not Sent",
+      "Sent to Customer",
+      "Customer Accepted",
+      "Customer Rejected",
+    ];
+
+    if (!Number.isInteger(quotationId) || quotationId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid quotation ID.",
+      });
+    }
+
+    if (!allowedStatuses.includes(customerStatus)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid customer status. Allowed: Not Sent, Sent to Customer, Customer Accepted, Customer Rejected.",
+      });
+    }
+
+    const quotation = await getQuotationById(quotationId);
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: "Quotation not found.",
+      });
+    }
+
+    await db.execute(
+      `UPDATE quotations
+       SET customer_status = ?
+       WHERE quotation_id = ?`,
+      [customerStatus, quotationId]
+    );
+
+    await createAuditLog({
+      userId: req.user?.user_id,
+      userRole: req.user?.role,
+      action: "Customer Quotation Status Updated",
+      recordId: quotationId,
+      details: `Changed customer response status to ${customerStatus}.`,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Customer quotation status updated successfully.",
+      quotation_id: quotationId,
+      customer_status: customerStatus,
+    });
+  } catch (error) {
+    console.error("Update customer quotation status error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update customer quotation status.",
+    });
+  }
+}
+
+// --------------------------------------------------
+// Exports
+// --------------------------------------------------
+
 module.exports = {
   getQuotationItemOptions,
   getQuotations,
@@ -884,4 +1073,6 @@ module.exports = {
   submitQuotationForApproval,
   approveQuotation,
   rejectQuotation,
+  updateQuotationStatus,
+  updateCustomerQuotationStatus, // Exported here
 };

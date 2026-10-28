@@ -1,4 +1,3 @@
-
 const express = require("express");
 
 const {
@@ -7,6 +6,8 @@ const {
   getQuotation,
   addQuotation,
   updateQuotation,
+  updateQuotationStatus,
+  updateCustomerQuotationStatus, // New controller function
   deleteQuotation,
   submitQuotationForApproval,
   approveQuotation,
@@ -37,6 +38,12 @@ router.post("/:id/approve", approveQuotation);
 
 // Reject a pending quotation (Super Admin only)
 router.post("/:id/reject", rejectQuotation);
+
+// Update quotation status (Draft or Sent)
+router.patch("/:id/status", updateQuotationStatus);
+
+// Update customer quotation status (Sent, Accepted, Rejected) - New Route
+router.patch("/:id/customer-status", updateCustomerQuotationStatus);
 
 // Get one quotation by ID
 router.get("/:id", getQuotation);
