@@ -2,7 +2,12 @@
 const {
   getAllCustomers,
   createCustomer,
+  getMostQuotedCustomers,
 } = require("../models/customerModel");
+
+// --------------------------------------------------
+// Get all customers
+// --------------------------------------------------
 
 async function getCustomers(req, res) {
   try {
@@ -10,10 +15,11 @@ async function getCustomers(req, res) {
 
     return res.status(200).json({
       success: true,
+      count: customers.length,
       customers,
     });
   } catch (error) {
-    console.error("Get customers error:", error.message);
+    console.error("Get customers error:", error);
 
     return res.status(500).json({
       success: false,
@@ -21,6 +27,10 @@ async function getCustomers(req, res) {
     });
   }
 }
+
+// --------------------------------------------------
+// Add customer manually
+// --------------------------------------------------
 
 async function addCustomer(req, res) {
   try {
@@ -34,7 +44,7 @@ async function addCustomer(req, res) {
       country,
       tax_number,
       notes,
-    } = req.body;
+    } = req.body || {};
 
     if (
       typeof customer_name !== "string" ||
@@ -46,17 +56,8 @@ async function addCustomer(req, res) {
       });
     }
 
-    const userId = req.user?.user_id;
-
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        message: "Authentication required.",
-      });
-    }
-
     const customerId = await createCustomer({
-      customer_name: customer_name.trim(),
+      customer_name,
       company_name,
       email,
       phone,
@@ -65,16 +66,16 @@ async function addCustomer(req, res) {
       country,
       tax_number,
       notes,
-      created_by: userId,
+      created_by: req.user?.user_id || null,
     });
 
     return res.status(201).json({
       success: true,
-      message: "Customer created successfully.",
+      message: "Customer created or existing customer reused successfully.",
       customer_id: customerId,
     });
   } catch (error) {
-    console.error("Create customer error:", error.message);
+    console.error("Add customer error:", error);
 
     return res.status(500).json({
       success: false,
@@ -83,7 +84,31 @@ async function addCustomer(req, res) {
   }
 }
 
+// --------------------------------------------------
+// Most quoted customers
+// --------------------------------------------------
+
+async function getMostQuotedCustomersController(req, res) {
+  try {
+    const customers = await getMostQuotedCustomers();
+
+    return res.status(200).json({
+      success: true,
+      count: customers.length,
+      customers,
+    });
+  } catch (error) {
+    console.error("Get most quoted customers error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve most quoted customers.",
+    });
+  }
+}
+
 module.exports = {
   getCustomers,
   addCustomer,
+  getMostQuotedCustomersController,
 };

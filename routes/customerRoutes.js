@@ -1,16 +1,17 @@
+
 const express = require("express");
+
 const {
   getCustomers,
   addCustomer,
+  getMostQuotedCustomersController,
 } = require("../controllers/customerController");
+
 const authMiddleware = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-// ==========================================
-// Test Route (Public - No Auth Required)
-// Endpoint: GET /api/customers/test
-// ==========================================
+// Test route
 router.get("/test", (req, res) => {
   res.json({
     success: true,
@@ -18,16 +19,17 @@ router.get("/test", (req, res) => {
   });
 });
 
-// ==========================================
-// Protected Routes (Authentication Required)
-// ==========================================
+// Most quoted customers - keep this before "/:id" if such a route exists.
+router.get(
+  "/most-quoted",
+  authMiddleware,
+  getMostQuotedCustomersController
+);
 
 // Get all customers
-// Endpoint: GET /api/customers/
 router.get("/", authMiddleware, getCustomers);
 
-// Add a new customer
-// Endpoint: POST /api/customers/
+// Add customer manually
 router.post("/", authMiddleware, addCustomer);
 
 module.exports = router;

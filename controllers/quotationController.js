@@ -8,8 +8,8 @@ const {
   updateQuotationWithItems,
   deleteQuotationById,
 } = require("../models/quotationModel");
-const { getActiveServices } = require("../models/serviceCatalogModel");
 
+const { getActiveServices } = require("../models/serviceCatalogModel");
 
 // --------------------------------------------------
 // Helpers
@@ -29,7 +29,12 @@ function isValidDate(value) {
 }
 
 function addProjectDuration(startDate, duration, unit) {
-  if (!startDate || duration === null || duration === undefined || duration === "") {
+  if (
+    !startDate ||
+    duration === null ||
+    duration === undefined ||
+    duration === ""
+  ) {
     return null;
   }
 
@@ -54,10 +59,23 @@ function addProjectDuration(startDate, duration, unit) {
   return date.toISOString().slice(0, 10);
 }
 
+// --------------------------------------------------
+// Validate quotation and customer data
+// --------------------------------------------------
+
 function validateQuotationData(body) {
   const {
     quotation_number,
     customer_id,
+    customer_name,
+    company_name,
+    email,
+    phone,
+    address,
+    city,
+    country,
+    tax_number,
+    customer_notes,
     quotation_date,
     project_start_date,
     estimated_duration,
@@ -82,12 +100,30 @@ function validateQuotationData(body) {
     errors.push("Quotation number is required.");
   }
 
+  // Existing customer ID is optional.
+  // If no ID is supplied, customer_name is required.
+  let normalizedCustomerId = null;
+
   if (
-    !customer_id ||
-    !Number.isInteger(Number(customer_id)) ||
-    Number(customer_id) <= 0
+    customer_id !== undefined &&
+    customer_id !== null &&
+    String(customer_id).trim() !== ""
   ) {
-    errors.push("A valid customer ID is required.");
+    normalizedCustomerId = Number(customer_id);
+
+    if (
+      !Number.isInteger(normalizedCustomerId) ||
+      normalizedCustomerId <= 0
+    ) {
+      errors.push("Customer ID must be a valid positive integer.");
+    }
+  } else if (
+    typeof customer_name !== "string" ||
+    !customer_name.trim()
+  ) {
+    errors.push(
+      "Customer name is required when creating a quotation without a customer ID."
+    );
   }
 
   if (!isValidDate(quotation_date)) {
@@ -122,7 +158,10 @@ function validateQuotationData(body) {
     errors.push("Invalid quotation status.");
   }
 
-  if (approval_status && !allowedApprovalStatuses.includes(approval_status)) {
+  if (
+    approval_status &&
+    !allowedApprovalStatuses.includes(approval_status)
+  ) {
     errors.push("Invalid approval status.");
   }
 
@@ -155,7 +194,9 @@ function validateQuotationData(body) {
     errors.push("Invalid duration unit.");
   }
 
-  const normalizedCurrency = String(currency || "LKR").trim().toUpperCase();
+  const normalizedCurrency = String(currency || "LKR")
+    .trim()
+    .toUpperCase();
 
   if (!/^[A-Z]{3}$/.test(normalizedCurrency)) {
     errors.push("Currency must be a valid three-letter currency code.");
@@ -186,7 +227,9 @@ function validateQuotationData(body) {
       }
 
       if (!Number.isFinite(unitPrice) || unitPrice < 0) {
-        errors.push(`Item ${index + 1}: unit price must be non-negative.`);
+        errors.push(
+          `Item ${index + 1}: unit price must be non-negative.`
+        );
       }
 
       if (
@@ -194,7 +237,9 @@ function validateQuotationData(body) {
         taxRate < 0 ||
         taxRate > 100
       ) {
-        errors.push(`Item ${index + 1}: tax rate must be between 0 and 100.`);
+        errors.push(
+          `Item ${index + 1}: tax rate must be between 0 and 100.`
+        );
       }
 
       if (
@@ -251,9 +296,25 @@ function validateQuotationData(body) {
   return {
     valid: true,
     items: normalizedItems,
+
     data: {
       quotation_number: quotation_number.trim(),
-      customer_id: Number(customer_id),
+
+      // Customer ID may be null when customer details are supplied.
+      customer_id: normalizedCustomerId,
+
+      // These fields are consumed by quotationModel.js to create
+      // or reuse a customer inside the quotation transaction.
+      customer_name: customer_name?.trim() || null,
+      company_name: company_name?.trim() || null,
+      email: email?.trim() || null,
+      phone: phone?.trim() || null,
+      address: address?.trim() || null,
+      city: city?.trim() || null,
+      country: country?.trim() || null,
+      tax_number: tax_number?.trim() || null,
+      customer_notes: customer_notes?.trim() || null,
+
       quotation_date,
       project_start_date: startDate,
       estimated_duration: duration,
@@ -304,7 +365,7 @@ async function getQuotationItemOptions(req, res) {
 }
 
 // --------------------------------------------------
-// Get quotations with date/status/search filters
+// Get quotations with filters
 // --------------------------------------------------
 
 async function getQuotations(req, res) {
@@ -343,7 +404,7 @@ async function getQuotations(req, res) {
 }
 
 // --------------------------------------------------
-// Get one quotation by ID
+// Get one quotation
 // --------------------------------------------------
 
 async function getQuotation(req, res) {
@@ -366,7 +427,6 @@ async function getQuotation(req, res) {
       });
     }
 
-    // Includes status and approval_status from the model.
     return res.status(200).json({
       success: true,
       quotation,
@@ -393,17 +453,13 @@ async function addQuotation(req, res) {
       return sendValidationErrors(res, result.errors);
     }
 
-    // Do not allow the create form to self-approve a quotation.
-    const requestedStatus = result.data.status;
-
-    if (["Approved", "Rejected"].includes(requestedStatus)) {
+    if (["Approved", "Rejected"].includes(result.data.status)) {
       return res.status(400).json({
         success: false,
-        message: "A quotation cannot be approved or rejected during creation.",
+        message:
+          "A quotation cannot be approved or rejected during creation.",
       });
     }
-
-    result.data.approval_status = "Not Required";
 
     const userId = req.user?.user_id;
 
@@ -413,6 +469,9 @@ async function addQuotation(req, res) {
         message: "Authenticated user information is missing.",
       });
     }
+
+    // New quotations must not start with a completed approval decision.
+    result.data.approval_status = "Not Required";
 
     const quotationId = await createQuotationWithItems(
       {
@@ -445,6 +504,16 @@ async function addQuotation(req, res) {
       });
     }
 
+    if (
+      error.message === "Selected customer was not found." ||
+      error.message === "Customer name is required."
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
     return res.status(500).json({
       success: false,
       message: "Failed to create quotation.",
@@ -467,20 +536,6 @@ async function updateQuotation(req, res) {
       });
     }
 
-    const result = validateQuotationData(req.body);
-
-    if (!result.valid) {
-      return sendValidationErrors(res, result.errors);
-    }
-
-    // Approval decisions must go through the protected approval endpoint.
-    if (["Approved", "Rejected"].includes(result.data.status)) {
-      return res.status(400).json({
-        success: false,
-        message: "Use the approval endpoint to approve or reject a quotation.",
-      });
-    }
-
     const existing = await getQuotationById(quotationId);
 
     if (!existing) {
@@ -490,12 +545,26 @@ async function updateQuotation(req, res) {
       });
     }
 
-    // Preserve an existing approval state unless the quotation is edited
-    // before approval. A pending request must be resubmitted after editing.
+    const result = validateQuotationData(req.body);
+
+    if (!result.valid) {
+      return sendValidationErrors(res, result.errors);
+    }
+
+    if (["Approved", "Rejected"].includes(result.data.status)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Use the approval endpoint to approve or reject a quotation.",
+      });
+    }
+
+    // Editing a quotation resets the approval state so it can be
+    // submitted again if required.
     if (
-      existing.approval_status === "Pending" ||
-      existing.approval_status === "Approved" ||
-      existing.approval_status === "Rejected"
+      ["Pending", "Approved", "Rejected"].includes(
+        existing.approval_status
+      )
     ) {
       result.data.approval_status = "Not Required";
     }
@@ -536,6 +605,16 @@ async function updateQuotation(req, res) {
       });
     }
 
+    if (
+      error.message === "Selected customer was not found." ||
+      error.message === "Customer name is required."
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
     return res.status(500).json({
       success: false,
       message: "Failed to update quotation.",
@@ -571,7 +650,8 @@ async function deleteQuotation(req, res) {
       if (result.reason === "linked_invoice") {
         return res.status(409).json({
           success: false,
-          message: "This quotation cannot be deleted because an invoice is linked to it.",
+          message:
+            "This quotation cannot be deleted because an invoice is linked to it.",
         });
       }
 
@@ -598,6 +678,7 @@ async function deleteQuotation(req, res) {
 // --------------------------------------------------
 // Submit quotation for approval
 // Admin or Super Admin can submit.
+// This endpoint does not send an email.
 // --------------------------------------------------
 
 async function submitQuotationForApproval(req, res) {
@@ -620,10 +701,15 @@ async function submitQuotationForApproval(req, res) {
       });
     }
 
-    if (["Approved", "Rejected", "Cancelled", "Expired"].includes(quotation.status)) {
+    if (
+      ["Approved", "Rejected", "Cancelled", "Expired"].includes(
+        quotation.status
+      )
+    ) {
       return res.status(400).json({
         success: false,
-        message: "This quotation cannot be submitted for approval in its current status.",
+        message:
+          "This quotation cannot be submitted for approval in its current status.",
       });
     }
 

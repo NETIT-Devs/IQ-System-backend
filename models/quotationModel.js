@@ -1,7 +1,8 @@
 
 const db = require("../config/db");
+const { createCustomer } = require("./customerModel");
 
-// Validate optional filters
+// Build quotation list filters.
 function buildQuotationFilters(filters = {}) {
   const conditions = [];
   const params = [];
@@ -22,8 +23,14 @@ function buildQuotationFilters(filters = {}) {
     "Rejected",
   ];
 
-  const { period, status, approval_status, search, from_date, to_date } =
-    filters;
+  const {
+    period,
+    status,
+    approval_status,
+    search,
+    from_date,
+    to_date,
+  } = filters;
 
   if (period && period !== "all") {
     const periodMap = {
@@ -100,7 +107,6 @@ function buildQuotationFilters(filters = {}) {
   };
 }
 
-// Get all quotations with filters and their items
 async function getAllQuotations(filters = {}) {
   const { where, params } = buildQuotationFilters(filters);
 
@@ -164,7 +170,6 @@ async function getAllQuotations(filters = {}) {
   return rows;
 }
 
-// Get one quotation by ID with its items
 async function getQuotationById(quotationId) {
   const [rows] = await db.execute(
     `SELECT
@@ -228,12 +233,46 @@ async function getQuotationById(quotationId) {
   return quotation;
 }
 
-// Create quotation and its items
+// Create quotation, customer (if needed), and quotation items atomically.
 async function createQuotationWithItems(quotation, items) {
   const connection = await db.getConnection();
 
   try {
     await connection.beginTransaction();
+
+    let customerId = quotation.customer_id;
+
+    // Reuse an explicitly selected customer if one was provided.
+    if (customerId) {
+      const [existingCustomer] = await connection.execute(
+        `SELECT customer_id
+         FROM customers
+         WHERE customer_id = ?
+         LIMIT 1`,
+        [customerId]
+      );
+
+      if (existingCustomer.length === 0) {
+        throw new Error("Selected customer was not found.");
+      }
+    } else {
+      // Otherwise create or find the customer from the quotation form.
+      customerId = await createCustomer(
+        {
+          customer_name: quotation.customer_name,
+          company_name: quotation.company_name,
+          email: quotation.email,
+          phone: quotation.phone,
+          address: quotation.address,
+          city: quotation.city,
+          country: quotation.country,
+          tax_number: quotation.tax_number,
+          notes: quotation.customer_notes,
+          created_by: quotation.created_by,
+        },
+        connection
+      );
+    }
 
     const [result] = await connection.execute(
       `INSERT INTO quotations (
@@ -258,7 +297,7 @@ async function createQuotationWithItems(quotation, items) {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         quotation.quotation_number,
-        quotation.customer_id,
+        customerId,
         quotation.created_by,
         quotation.quotation_date,
         quotation.project_start_date || quotation.quotation_date,
@@ -314,6 +353,7 @@ async function createQuotationWithItems(quotation, items) {
     }
 
     await connection.commit();
+
     return quotationId;
   } catch (error) {
     await connection.rollback();
@@ -323,8 +363,12 @@ async function createQuotationWithItems(quotation, items) {
   }
 }
 
-// Update quotation and its items
-async function updateQuotationWithItems(quotationId, quotation, items) {
+// Update quotation and its items.
+async function updateQuotationWithItems(
+  quotationId,
+  quotation,
+  items
+) {
   const connection = await db.getConnection();
 
   try {
@@ -341,6 +385,39 @@ async function updateQuotationWithItems(quotationId, quotation, items) {
     if (existing.length === 0) {
       await connection.rollback();
       return false;
+    }
+
+    // If a customer ID is supplied, ensure it exists.
+    let customerId = quotation.customer_id;
+
+    if (customerId) {
+      const [customers] = await connection.execute(
+        `SELECT customer_id
+         FROM customers
+         WHERE customer_id = ?
+         LIMIT 1`,
+        [customerId]
+      );
+
+      if (customers.length === 0) {
+        throw new Error("Selected customer was not found.");
+      }
+    } else {
+      customerId = await createCustomer(
+        {
+          customer_name: quotation.customer_name,
+          company_name: quotation.company_name,
+          email: quotation.email,
+          phone: quotation.phone,
+          address: quotation.address,
+          city: quotation.city,
+          country: quotation.country,
+          tax_number: quotation.tax_number,
+          notes: quotation.customer_notes,
+          created_by: quotation.created_by,
+        },
+        connection
+      );
     }
 
     await connection.execute(
@@ -365,7 +442,7 @@ async function updateQuotationWithItems(quotationId, quotation, items) {
        WHERE quotation_id = ?`,
       [
         quotation.quotation_number,
-        quotation.customer_id,
+        customerId,
         quotation.quotation_date,
         quotation.project_start_date || quotation.quotation_date,
         quotation.estimated_duration ?? null,
@@ -386,7 +463,8 @@ async function updateQuotationWithItems(quotationId, quotation, items) {
     );
 
     await connection.execute(
-      `DELETE FROM quotation_items WHERE quotation_id = ?`,
+      `DELETE FROM quotation_items
+       WHERE quotation_id = ?`,
       [quotationId]
     );
 
@@ -424,6 +502,7 @@ async function updateQuotationWithItems(quotationId, quotation, items) {
     }
 
     await connection.commit();
+
     return true;
   } catch (error) {
     await connection.rollback();
@@ -433,7 +512,6 @@ async function updateQuotationWithItems(quotationId, quotation, items) {
   }
 }
 
-// Delete quotation and its items
 async function deleteQuotationById(quotationId) {
   const connection = await db.getConnection();
 
@@ -467,16 +545,19 @@ async function deleteQuotationById(quotationId) {
     }
 
     await connection.execute(
-      `DELETE FROM quotation_items WHERE quotation_id = ?`,
+      `DELETE FROM quotation_items
+       WHERE quotation_id = ?`,
       [quotationId]
     );
 
     await connection.execute(
-      `DELETE FROM quotations WHERE quotation_id = ?`,
+      `DELETE FROM quotations
+       WHERE quotation_id = ?`,
       [quotationId]
     );
 
     await connection.commit();
+
     return { deleted: true };
   } catch (error) {
     await connection.rollback();
