@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 
 const db = require("./config/db");
 
@@ -14,12 +15,16 @@ const quotationTopicRoutes = require("./routes/quotationTopicRoutes");
 const quotationTypeRoutes = require("./routes/quotationTypeRoutes");
 const companySettingsRoutes = require("./routes/companySettingsRoutes");
 const auditLogRoutes = require("./routes/auditLogRoutes");
+const adminDashboardRoutes = require("./routes/adminDashboardRoutes");
+const superAdminDashboardRoutes = require("./routes/superAdminDashboardRoutes");
+const reportRoutes = require("./routes/reportRoutes");
 
 const app = express();
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Health check
 app.get("/", (req, res) => {
@@ -38,6 +43,9 @@ app.use("/api/quotation-topics", quotationTopicRoutes);
 app.use("/api/quotation-types", quotationTypeRoutes);
 app.use("/api/company-settings", companySettingsRoutes);
 app.use("/api/audit-logs", auditLogRoutes);
+app.use("/api/admin/dashboard", adminDashboardRoutes);
+app.use("/api/super-admin/dashboard", superAdminDashboardRoutes);
+app.use("/api/reports", reportRoutes);
 
 // Handle unknown routes
 app.use((req, res) => {
