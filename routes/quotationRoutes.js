@@ -15,6 +15,13 @@ const {
 } = require("../controllers/quotationController");
 
 const authMiddleware = require("../middleware/authMiddleware");
+const {
+  listServices,
+  addService,
+  editService,
+  removeService,
+} = require("../controllers/serviceCatalogController");
+const superAdminMiddleware = authMiddleware.superAdminMiddleware;
 
 const router = express.Router();
 
@@ -23,6 +30,12 @@ router.use(authMiddleware);
 
 // Get quotation item/service options
 router.get("/item-options", getQuotationItemOptions);
+
+// Manage quotation form service catalog
+router.get("/services", listServices);
+router.post("/services", superAdminMiddleware, addService);
+router.put("/services/:id", superAdminMiddleware, editService);
+router.delete("/services/:id", superAdminMiddleware, removeService);
 
 // Get quotations with optional filters and search
 router.get("/", getQuotations);
