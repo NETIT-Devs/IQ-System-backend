@@ -30,7 +30,13 @@ function buildQuotationFilters(filters = {}) {
     search,
     from_date,
     to_date,
+    created_by,
   } = filters;
+
+  if (created_by !== undefined && created_by !== null) {
+    conditions.push("q.created_by = ?");
+    params.push(created_by);
+  }
 
   if (period && period !== "all") {
     const periodMap = {
@@ -171,7 +177,16 @@ async function getAllQuotations(filters = {}) {
   return rows;
 }
 
-async function getQuotationById(quotationId) {
+async function getQuotationById(quotationId, createdBy) {
+  const ownerCondition =
+    createdBy === undefined || createdBy === null
+      ? ""
+      : "AND q.created_by = ?";
+  const params =
+    createdBy === undefined || createdBy === null
+      ? [quotationId]
+      : [quotationId, createdBy];
+
   const [rows] = await db.execute(
     `SELECT
       q.quotation_id,
@@ -201,8 +216,9 @@ async function getQuotationById(quotationId) {
     INNER JOIN customers c
       ON q.customer_id = c.customer_id
     WHERE q.quotation_id = ?
+      ${ownerCondition}
     LIMIT 1`,
-    [quotationId]
+    params
   );
 
   if (rows.length === 0) {
@@ -352,19 +368,26 @@ async function createQuotationWithItems(quotation, items) {
 async function updateQuotationWithItems(
   quotationId,
   quotation,
-  items
+  items,
+  createdBy
 ) {
   const connection = await db.getConnection();
 
   try {
     await connection.beginTransaction();
 
+    const ownerCondition =
+      createdBy === undefined || createdBy === null
+        ? ""
+        : "AND created_by = ?";
+    const ownerParams =
+      createdBy === undefined || createdBy === null ? [] : [createdBy];
     const [existing] = await connection.execute(
       `SELECT quotation_id
        FROM quotations
-       WHERE quotation_id = ?
+       WHERE quotation_id = ? ${ownerCondition}
        FOR UPDATE`,
-      [quotationId]
+      [quotationId, ...ownerParams]
     );
 
     if (existing.length === 0) {
@@ -481,18 +504,24 @@ async function updateQuotationWithItems(
   }
 }
 
-async function deleteQuotationById(quotationId) {
+async function deleteQuotationById(quotationId, createdBy) {
   const connection = await db.getConnection();
 
   try {
     await connection.beginTransaction();
 
+    const ownerCondition =
+      createdBy === undefined || createdBy === null
+        ? ""
+        : "AND created_by = ?";
+    const ownerParams =
+      createdBy === undefined || createdBy === null ? [] : [createdBy];
     const [quotations] = await connection.execute(
       `SELECT quotation_id
        FROM quotations
-       WHERE quotation_id = ?
+       WHERE quotation_id = ? ${ownerCondition}
        FOR UPDATE`,
-      [quotationId]
+      [quotationId, ...ownerParams]
     );
 
     if (quotations.length === 0) {

@@ -15,6 +15,10 @@ const { createAuditLog } = require("../models/auditLogModel");
 // Helpers
 // --------------------------------------------------
 
+function getQuotationOwnerId(req) {
+  return req.user?.role === "Super Admin" ? undefined : req.user?.user_id;
+}
+
 function isValidDate(value) {
   if (!value || typeof value !== "string") return false;
 
@@ -377,6 +381,7 @@ async function getQuotations(req, res) {
       search,
       from_date,
       to_date,
+      created_by: getQuotationOwnerId(req),
     });
 
     return res.status(200).json({
@@ -409,7 +414,10 @@ async function getQuotation(req, res) {
       });
     }
 
-    const quotation = await getQuotationById(quotationId);
+    const quotation = await getQuotationById(
+      quotationId,
+      getQuotationOwnerId(req)
+    );
 
     if (!quotation) {
       return res.status(404).json({
@@ -534,7 +542,8 @@ async function updateQuotation(req, res) {
       });
     }
 
-    const existing = await getQuotationById(quotationId);
+    const ownerId = getQuotationOwnerId(req);
+    const existing = await getQuotationById(quotationId, ownerId);
 
     if (!existing) {
       return res.status(404).json({
@@ -568,7 +577,8 @@ async function updateQuotation(req, res) {
     const updated = await updateQuotationWithItems(
       quotationId,
       result.data,
-      result.items
+      result.items,
+      ownerId
     );
 
     if (!updated) {
@@ -641,7 +651,10 @@ async function deleteQuotation(req, res) {
       });
     }
 
-    const result = await deleteQuotationById(quotationId);
+    const result = await deleteQuotationById(
+      quotationId,
+      getQuotationOwnerId(req)
+    );
 
     if (!result.deleted) {
       if (result.reason === "not_found") {
@@ -702,7 +715,10 @@ async function submitQuotationForApproval(req, res) {
       });
     }
 
-    const quotation = await getQuotationById(quotationId);
+    const quotation = await getQuotationById(
+      quotationId,
+      getQuotationOwnerId(req)
+    );
 
     if (!quotation) {
       return res.status(404).json({
@@ -728,8 +744,11 @@ async function submitQuotationForApproval(req, res) {
        SET status = 'Sent',
            approval_status = 'Pending'
        WHERE quotation_id = ?
-         AND approval_status <> 'Pending'`,
-      [quotationId]
+         AND approval_status <> 'Pending'
+         ${req.user.role === "Super Admin" ? "" : "AND created_by = ?"}`,
+      req.user.role === "Super Admin"
+        ? [quotationId]
+        : [quotationId, req.user.user_id]
     );
 
     if (result.affectedRows === 0) {
@@ -935,7 +954,10 @@ async function updateQuotationStatus(req, res) {
       });
     }
 
-    const quotation = await getQuotationById(quotationId);
+    const quotation = await getQuotationById(
+      quotationId,
+      getQuotationOwnerId(req)
+    );
 
     if (!quotation) {
       return res.status(404).json({
@@ -960,8 +982,11 @@ async function updateQuotationStatus(req, res) {
     await db.execute(
       `UPDATE quotations
        SET status = ?
-       WHERE quotation_id = ?`,
-      [status, quotationId]
+       WHERE quotation_id = ?
+         ${req.user.role === "Super Admin" ? "" : "AND created_by = ?"}`,
+      req.user.role === "Super Admin"
+        ? [status, quotationId]
+        : [status, quotationId, req.user.user_id]
     );
 
     await createAuditLog({
@@ -1019,7 +1044,10 @@ async function updateCustomerQuotationStatus(req, res) {
       });
     }
 
-    const quotation = await getQuotationById(quotationId);
+    const quotation = await getQuotationById(
+      quotationId,
+      getQuotationOwnerId(req)
+    );
 
     if (!quotation) {
       return res.status(404).json({
@@ -1031,8 +1059,11 @@ async function updateCustomerQuotationStatus(req, res) {
     await db.execute(
       `UPDATE quotations
        SET customer_status = ?
-       WHERE quotation_id = ?`,
-      [customerStatus, quotationId]
+       WHERE quotation_id = ?
+         ${req.user.role === "Super Admin" ? "" : "AND created_by = ?"}`,
+      req.user.role === "Super Admin"
+        ? [customerStatus, quotationId]
+        : [customerStatus, quotationId, req.user.user_id]
     );
 
     await createAuditLog({

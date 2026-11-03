@@ -1,30 +1,27 @@
+
 require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-const path = require("path");
 
+// Import database connection
 const db = require("./config/db");
 
-// Route imports
+// Import API routes
 const authRoutes = require("./routes/authRoutes");
 const customerRoutes = require("./routes/customerRoutes");
-const userRoutes = require("./routes/userRoutes");
 const quotationRoutes = require("./routes/quotationRoutes");
-const quotationTopicRoutes = require("./routes/quotationTopicRoutes");
-const quotationTypeRoutes = require("./routes/quotationTypeRoutes");
-const companySettingsRoutes = require("./routes/companySettingsRoutes");
+const invoiceRoutes = require("./routes/invoiceRoutes");
 const auditLogRoutes = require("./routes/auditLogRoutes");
-const adminDashboardRoutes = require("./routes/adminDashboardRoutes");
-const superAdminDashboardRoutes = require("./routes/superAdminDashboardRoutes");
-const reportRoutes = require("./routes/reportRoutes");
+const companySettingsRoutes = require("./routes/companySettingsRoutes");
+const userRoutes = require("./routes/userRoutes");
 
 const app = express();
 
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use(express.urlencoded({ extended: true }));
 
 // Health check
 app.get("/", (req, res) => {
@@ -34,39 +31,49 @@ app.get("/", (req, res) => {
   });
 });
 
-// API routes
+// Authentication API
 app.use("/api/auth", authRoutes);
-app.use("/api/customers", customerRoutes);
-app.use("/api/users", userRoutes);
-app.use("/api/quotations", quotationRoutes);
-app.use("/api/quotation-topics", quotationTopicRoutes);
-app.use("/api/quotation-types", quotationTypeRoutes);
-app.use("/api/company-settings", companySettingsRoutes);
-app.use("/api/audit-logs", auditLogRoutes);
-app.use("/api/admin/dashboard", adminDashboardRoutes);
-app.use("/api/super-admin/dashboard", superAdminDashboardRoutes);
-app.use("/api/reports", reportRoutes);
 
-// Handle unknown routes
+// Customer API
+app.use("/api/customers", customerRoutes);
+
+// Quotation API
+app.use("/api/quotations", quotationRoutes);
+
+// Invoice API
+app.use("/api/invoices", invoiceRoutes);
+
+// Audit log API
+app.use("/api/audit-logs", auditLogRoutes);
+
+// Company settings API
+app.use("/api/company-settings", companySettingsRoutes);
+
+// User management API
+app.use("/api/users", userRoutes);
+
+// 404 - Route not found
 app.use((req, res) => {
   res.status(404).json({
     success: false,
-    message: `Route not found: ${req.method} ${req.originalUrl}`,
+    message: "API route not found.",
   });
 });
 
 // Global error handler
 app.use((err, req, res, next) => {
-  console.error("Server error:", err);
+  console.error("Server error:", err.message);
 
-  res.status(err.status || 500).json({
+  res.status(500).json({
     success: false,
-    message: "Internal server error",
+    message: "Internal server error.",
   });
 });
 
+// Server configuration
 const PORT = process.env.PORT || 5000;
 
+// Start server after database connection
 async function startServer() {
   try {
     await db.query("SELECT 1");
