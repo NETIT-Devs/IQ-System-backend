@@ -452,11 +452,15 @@ async function addQuotation(req, res) {
       return sendValidationErrors(res, result.errors);
     }
 
-    if (["Approved", "Rejected"].includes(result.data.status)) {
+    if (
+      result.data.status === "Rejected" ||
+      (result.data.status === "Approved" &&
+        req.user?.role !== "Super Admin")
+    ) {
       return res.status(400).json({
         success: false,
         message:
-          "A quotation cannot be approved or rejected during creation.",
+          "Only Super Admin can finalize a quotation as approved.",
       });
     }
 
@@ -469,7 +473,11 @@ async function addQuotation(req, res) {
       });
     }
 
-    result.data.approval_status = "Not Required";
+    // Save finalized Super Admin quotations as approved in the database.
+    result.data.approval_status =
+      req.user.role === "Super Admin" && result.data.status === "Approved"
+        ? "Approved"
+        : "Not Required";
 
     const quotationId = await createQuotationWithItems(
       {
@@ -558,15 +566,22 @@ async function updateQuotation(req, res) {
       return sendValidationErrors(res, result.errors);
     }
 
-    if (["Approved", "Rejected"].includes(result.data.status)) {
+    if (
+      result.data.status === "Rejected" ||
+      (result.data.status === "Approved" &&
+        req.user?.role !== "Super Admin")
+    ) {
       return res.status(400).json({
         success: false,
         message:
-          "Use the approval endpoint to approve or reject a quotation.",
+          "Only Super Admin can finalize a quotation as approved.",
       });
     }
 
-    if (
+    // Preserve the approved state when Super Admin finalizes an edited quotation.
+    if (req.user.role === "Super Admin" && result.data.status === "Approved") {
+      result.data.approval_status = "Approved";
+    } else if (
       ["Pending", "Approved", "Rejected"].includes(
         existing.approval_status
       )
@@ -868,6 +883,22 @@ async function rejectQuotation(req, res) {
       });
     }
 
+    // Require a rejection reason and keep it within the database field limit.
+    const rejectionReason =
+      typeof req.body?.rejection_reason === "string"
+        ? req.body.rejection_reason.trim()
+        : typeof req.body?.reason === "string"
+          ? req.body.reason.trim()
+          : "";
+
+    if (!rejectionReason || rejectionReason.length > 2000) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "A rejection reason is required and must be 2000 characters or fewer.",
+      });
+    }
+
     const quotationId = Number(req.params.id);
 
     if (!Number.isInteger(quotationId) || quotationId <= 0) {
@@ -880,10 +911,11 @@ async function rejectQuotation(req, res) {
     const [result] = await db.execute(
       `UPDATE quotations
        SET status = 'Rejected',
-           approval_status = 'Rejected'
+           approval_status = 'Rejected',
+           rejection_reason = ?
        WHERE quotation_id = ?
          AND approval_status = 'Pending'`,
-      [quotationId]
+      [rejectionReason, quotationId]
     );
 
     if (result.affectedRows === 0) {
@@ -907,7 +939,7 @@ async function rejectQuotation(req, res) {
       userRole: req.user?.role,
       action: "Quotation Rejected",
       recordId: quotationId,
-      details: "Rejected quotation.",
+      details: `Rejected quotation. Reason: ${rejectionReason}`,
     });
 
     return res.status(200).json({
@@ -916,6 +948,7 @@ async function rejectQuotation(req, res) {
       quotation_id: quotationId,
       status: "Rejected",
       approval_status: "Rejected",
+      rejection_reason: rejectionReason,
     });
   } catch (error) {
     console.error("Reject quotation error:", error);

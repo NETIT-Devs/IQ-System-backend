@@ -73,25 +73,29 @@ async function addCustomer(req, res) {
       });
     }
 
-    const customerId = await createCustomer({
-      customer_name,
-      company_name,
-      email,
-      phone,
-      address,
-      city,
-      country,
-      tax_number,
-      notes,
-      created_by: req.user?.user_id || null,
-    });
+    const customerId = await createCustomer(
+      {
+        customer_name,
+        company_name,
+        email,
+        phone,
+        address,
+        city,
+        country,
+        tax_number,
+        notes,
+        created_by: req.user?.user_id || null,
+      },
+      undefined,
+      { rejectExisting: true }
+    );
 
     await createAuditLog({
       userId: req.user?.user_id,
       userRole: req.user?.role,
-      action: "Customer Created or Reused",
+      action: "Customer Created",
       recordId: customerId,
-      details: `Created or reused customer ${customer_name.trim()}.`,
+      details: `Created customer ${customer_name.trim()}.`,
     });
 
     return res.status(201).json({
@@ -101,6 +105,16 @@ async function addCustomer(req, res) {
     });
   } catch (error) {
     console.error("Add customer error:", error);
+
+    if (error.code === "CUSTOMER_ALREADY_EXISTS") {
+      return res.status(409).json({
+        success: false,
+        message:
+          error.createdByRole === "Super Admin"
+            ? "This customer has already been added by Super Admin."
+            : "This customer already exists.",
+      });
+    }
 
     return res.status(500).json({
       success: false,

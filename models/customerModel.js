@@ -55,7 +55,7 @@ async function getAllCustomers({ search = "", period = "" } = {}) {
 async function createCustomer(
   customer,
   connection = db,
-  { matchByNameOnly = false } = {}
+  { matchByNameOnly = false, rejectExisting = false } = {}
 ) {
   const {
     customer_name,
@@ -76,6 +76,37 @@ async function createCustomer(
 
   if (!name) {
     throw new Error("Customer name is required.");
+  }
+
+  // Reject duplicate manual customer submissions while keeping reuse behavior for invoices and quotations.
+  if (rejectExisting) {
+    const identityConditions = ["LOWER(TRIM(c.customer_name)) = LOWER(?)"];
+    const identityParams = [name];
+
+    if (normalizedEmail) {
+      identityConditions.push("LOWER(TRIM(c.email)) = ?");
+      identityParams.push(normalizedEmail);
+    } else if (normalizedPhone) {
+      identityConditions.push("TRIM(c.phone) = ?");
+      identityParams.push(normalizedPhone);
+    }
+
+    const [existingCustomers] = await connection.execute(
+      `SELECT c.customer_id, u.role AS created_by_role
+       FROM customers c
+       LEFT JOIN users u
+         ON u.user_id = c.created_by
+       WHERE ${identityConditions.join(" OR ")}
+       LIMIT 1`,
+      identityParams
+    );
+
+    if (existingCustomers.length > 0) {
+      const error = new Error("Customer already exists.");
+      error.code = "CUSTOMER_ALREADY_EXISTS";
+      error.createdByRole = existingCustomers[0].created_by_role;
+      throw error;
+    }
   }
 
   // Prefer an existing customer with the same normalized name.
