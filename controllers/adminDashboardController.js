@@ -1,11 +1,17 @@
 const AdminDashboardModel = require('../models/adminDashboardModel');
 
+function getDashboardOwnerId(req) {
+  return req.user?.role === "Super Admin" ? undefined : req.user?.user_id;
+}
+
 // @desc    Get Admin Dashboard Overview Stats
 // @route   GET /api/admin/dashboard/overview
 // @access  Private (Admin & Super Admin)
 exports.getOverview = async (req, res) => {
   try {
-    const stats = await AdminDashboardModel.getOverviewStats();
+    const stats = await AdminDashboardModel.getOverviewStats(
+      getDashboardOwnerId(req)
+    );
     res.status(200).json({
       success: true,
       data: stats
@@ -21,7 +27,9 @@ exports.getOverview = async (req, res) => {
 // @access  Private (Admin & Super Admin)
 exports.getFinancialOverview = async (req, res) => {
   try {
-    const financialData = await AdminDashboardModel.getFinancialOverview();
+    const financialData = await AdminDashboardModel.getFinancialOverview(
+      getDashboardOwnerId(req)
+    );
     res.status(200).json({
       success: true,
       data: financialData
@@ -37,7 +45,9 @@ exports.getFinancialOverview = async (req, res) => {
 // @access  Private (Admin & Super Admin)
 exports.getInvoiceStatus = async (req, res) => {
   try {
-    const statusSummary = await AdminDashboardModel.getInvoiceStatusSummary();
+    const statusSummary = await AdminDashboardModel.getInvoiceStatusSummary(
+      getDashboardOwnerId(req)
+    );
     res.status(200).json({
       success: true,
       data: statusSummary

@@ -3,7 +3,7 @@ const db = require("../config/db");
 
 const AdminDashboardModel = {
   // 1. Overview Cards Stats
-  getOverviewStats: async () => {
+  getOverviewStats: async (createdBy) => {
     const [customerCount] = await db.query(`
       SELECT COUNT(*) AS totalCustomers
       FROM customers
@@ -12,7 +12,8 @@ const AdminDashboardModel = {
     const [quotationCount] = await db.query(`
       SELECT COUNT(*) AS totalQuotations
       FROM quotations
-    `);
+      ${createdBy == null ? "" : "WHERE created_by = ?"}
+    `, createdBy == null ? [] : [createdBy]);
 
     const [invoiceCount] = await db.query(`
       SELECT
@@ -24,7 +25,8 @@ const AdminDashboardModel = {
           END
         ), 0) AS outstandingBalance
       FROM invoices
-    `);
+      ${createdBy == null ? "" : "WHERE created_by = ?"}
+    `, createdBy == null ? [] : [createdBy]);
 
     return {
       totalCustomers: Number(customerCount[0].totalCustomers),
@@ -35,11 +37,14 @@ const AdminDashboardModel = {
   },
 
   // 2. Financial Overview (Income vs Expenses)
-  getFinancialOverview: async () => {
+  getFinancialOverview: async (createdBy) => {
     const [incomeResult] = await db.query(`
-      SELECT COALESCE(SUM(amount), 0) AS totalIncome
-      FROM payments
-    `);
+      SELECT COALESCE(SUM(p.amount), 0) AS totalIncome
+      FROM payments p
+      INNER JOIN invoices i
+        ON i.invoice_id = p.invoice_id
+      ${createdBy == null ? "" : "WHERE i.created_by = ?"}
+    `, createdBy == null ? [] : [createdBy]);
 
     return {
       income: Number(incomeResult[0].totalIncome),
@@ -48,7 +53,7 @@ const AdminDashboardModel = {
   },
 
   // 3. Invoice Status Distribution
-  getInvoiceStatusSummary: async () => {
+  getInvoiceStatusSummary: async (createdBy) => {
     const [rows] = await db.query(`
       SELECT
         COUNT(*) AS totalInvoices,
@@ -85,7 +90,8 @@ const AdminDashboardModel = {
         ), 0) AS partiallyPaid
 
       FROM invoices
-    `);
+      ${createdBy == null ? "" : "WHERE created_by = ?"}
+    `, createdBy == null ? [] : [createdBy]);
 
     return {
       totalInvoices: Number(rows[0].totalInvoices),

@@ -86,7 +86,9 @@ async function createCustomer(
     if (normalizedEmail) {
       identityConditions.push("LOWER(TRIM(c.email)) = ?");
       identityParams.push(normalizedEmail);
-    } else if (normalizedPhone) {
+    }
+
+    if (normalizedPhone) {
       identityConditions.push("TRIM(c.phone) = ?");
       identityParams.push(normalizedPhone);
     }
@@ -97,6 +99,7 @@ async function createCustomer(
        LEFT JOIN users u
          ON u.user_id = c.created_by
        WHERE ${identityConditions.join(" OR ")}
+       ORDER BY (u.role = 'Super Admin') DESC
        LIMIT 1`,
       identityParams
     );
