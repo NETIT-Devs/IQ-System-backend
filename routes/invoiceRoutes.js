@@ -3,8 +3,11 @@ const express = require("express");
 
 const {
   getInvoices,
+  getPendingInvoiceApprovals,
   getInvoice,
   addInvoice,
+  approveInvoice,
+  rejectInvoice,
   editInvoice,
   removeInvoice,
   getInvoicePdf,
@@ -13,11 +16,32 @@ const {
 } = require("../controllers/invoiceController");
 
 const authMiddleware = require("../middleware/authMiddleware");
+const { superAdminMiddleware } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
 // List invoices available to the authenticated user.
 router.get("/", authMiddleware, getInvoices);
+
+// List and review invoices waiting for Super Admin approval.
+router.get(
+  "/approvals",
+  authMiddleware,
+  superAdminMiddleware,
+  getPendingInvoiceApprovals
+);
+router.post(
+  "/:id/approve",
+  authMiddleware,
+  superAdminMiddleware,
+  approveInvoice
+);
+router.post(
+  "/:id/reject",
+  authMiddleware,
+  superAdminMiddleware,
+  rejectInvoice
+);
 
 // Get one invoice and its details.
 router.get("/:id", authMiddleware, getInvoice);

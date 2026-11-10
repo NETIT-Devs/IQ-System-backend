@@ -1,16 +1,28 @@
 
 const db = require("../config/db");
+const { getPeriodCondition, normalizePeriod } = require("../utils/periodFilter");
+
+function getDashboardPeriod(period) {
+  const normalized = normalizePeriod(period);
+  if (!normalized) {
+    throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
+  }
+  return normalized;
+}
 
 // 1. Dashboard overview
-async function getDashboardOverview() {
+async function getDashboardOverview(requestedPeriod) {
+  const period = getDashboardPeriod(requestedPeriod);
   const [customerRows] = await db.query(`
     SELECT COUNT(*) AS total_customers
     FROM customers
+    WHERE ${getPeriodCondition("created_at", period)}
   `);
 
   const [quotationRows] = await db.query(`
     SELECT COUNT(*) AS total_quotations
     FROM quotations
+    WHERE ${getPeriodCondition("quotation_date", period)}
   `);
 
   const [invoiceRows] = await db.query(`
@@ -23,6 +35,7 @@ async function getDashboardOverview() {
         END
       ), 0) AS outstanding_balance
     FROM invoices
+    WHERE ${getPeriodCondition("invoice_date", period)}
   `);
 
   return {
@@ -34,10 +47,12 @@ async function getDashboardOverview() {
 }
 
 // 2. Financial overview
-async function getFinancialOverview() {
+async function getFinancialOverview(requestedPeriod) {
+  const period = getDashboardPeriod(requestedPeriod);
   const [incomeRows] = await db.query(`
     SELECT COALESCE(SUM(amount), 0) AS total_income
     FROM payments
+    WHERE ${getPeriodCondition("payment_date", period)}
   `);
 
   return {
@@ -49,7 +64,8 @@ async function getFinancialOverview() {
 }
 
 // 3. Invoice status overview
-async function getInvoiceStatusOverview() {
+async function getInvoiceStatusOverview(requestedPeriod) {
+  const period = getDashboardPeriod(requestedPeriod);
   const [rows] = await db.query(`
     SELECT
       COUNT(*) AS total_invoices,
@@ -93,6 +109,7 @@ async function getInvoiceStatusOverview() {
       ), 0) AS outstanding_balance
 
     FROM invoices
+    WHERE ${getPeriodCondition("invoice_date", period)}
   `);
 
   const row = rows[0];

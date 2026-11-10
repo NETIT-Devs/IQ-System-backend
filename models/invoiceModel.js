@@ -1,5 +1,6 @@
 const db = require("../config/db");
 const { createCustomer } = require("./customerModel");
+const { getPeriodCondition, normalizePeriod } = require("../utils/periodFilter");
 
 // Whitelist invoice columns that can be inserted or updated.
 const invoiceFields = [
@@ -199,17 +200,44 @@ async function addInvoiceItems(invoices) {
       [invoice.invoice_id]
     );
     invoice.items = items;
+
+    const [payments] = await db.execute(
+      `SELECT
+         payment_id,
+         invoice_id,
+         quotation_id,
+         payment_date,
+         amount,
+         payment_method,
+         payment_type,
+         reference_number,
+         payment_slip,
+         payment_status,
+         verified_by,
+         verified_at,
+         rejection_reason,
+         notes
+       FROM payments
+       WHERE invoice_id = ?
+       ORDER BY payment_date DESC, payment_id DESC`,
+      [invoice.invoice_id]
+    );
+    invoice.payment_history = payments;
   }
 }
 
 // List invoices, optionally restricted to the creating administrator.
-async function getAllInvoices(createdBy) {
-  const ownerCondition =
-    createdBy === undefined || createdBy === null
-      ? ""
-      : "WHERE i.created_by = ?";
-  const params =
-    createdBy === undefined || createdBy === null ? [] : [createdBy];
+async function getAllInvoices(createdBy, requestedPeriod) {
+  const period = normalizePeriod(requestedPeriod);
+  if (!period) {
+    throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
+  }
+  const conditions = [getPeriodCondition("i.invoice_date", period)];
+  const params = [];
+  if (createdBy !== undefined && createdBy !== null) {
+    conditions.push("i.created_by = ?");
+    params.push(createdBy);
+  }
 
   const [rows] = await db.execute(
     `SELECT
@@ -222,9 +250,36 @@ async function getAllInvoices(createdBy) {
      FROM invoices i
      LEFT JOIN customers c
        ON i.customer_id = c.customer_id
-     ${ownerCondition}
+     WHERE ${conditions.join(" AND ")}
      ORDER BY i.invoice_id DESC`,
     params
+  );
+
+  await addInvoiceItems(rows);
+  return rows;
+}
+
+// Retrieve invoices waiting for Super Admin approval.
+async function getPendingInvoiceApprovals(requestedPeriod) {
+  const period = normalizePeriod(requestedPeriod);
+  if (!period) {
+    throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
+  }
+
+  const [rows] = await db.execute(
+    `SELECT
+       i.*,
+       c.customer_name,
+       c.company_name AS customer_company,
+       c.email AS customer_email,
+       c.phone AS customer_phone,
+       c.address AS customer_address
+     FROM invoices i
+     LEFT JOIN customers c
+       ON i.customer_id = c.customer_id
+     WHERE i.approval_status = 'Pending'
+       AND ${getPeriodCondition("i.invoice_date", period)}
+     ORDER BY i.created_at ASC, i.invoice_id ASC`
   );
 
   await addInvoiceItems(rows);
@@ -267,6 +322,65 @@ async function getInvoiceById(invoiceId, createdBy) {
   return rows[0];
 }
 
+// Apply a Super Admin decision to an invoice that is still pending.
+async function reviewInvoiceApproval(
+  invoiceId,
+  reviewedBy,
+  approvalStatus,
+  rejectionReason = null
+) {
+  const connection = await db.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const [invoices] = await connection.execute(
+      `SELECT invoice_id, invoice_number, created_by, approval_status
+       FROM invoices
+       WHERE invoice_id = ?
+       FOR UPDATE`,
+      [invoiceId]
+    );
+
+    if (invoices.length === 0) {
+      await connection.rollback();
+      return null;
+    }
+
+    const invoice = invoices[0];
+    if (invoice.approval_status !== "Pending") {
+      const error = new Error("Only pending invoices can be reviewed.");
+      error.code = "INVOICE_NOT_PENDING";
+      throw error;
+    }
+
+    await connection.execute(
+      `UPDATE invoices
+       SET approval_status = ?,
+           approval_rejection_reason = ?,
+           approval_reviewed_by = ?,
+           approval_reviewed_at = NOW()
+       WHERE invoice_id = ?
+         AND approval_status = 'Pending'`,
+      [approvalStatus, rejectionReason, reviewedBy, invoiceId]
+    );
+
+    await connection.commit();
+    return {
+      invoice_id: invoice.invoice_id,
+      invoice_number: invoice.invoice_number,
+      created_by: invoice.created_by,
+      approval_status: approvalStatus,
+      rejection_reason: rejectionReason,
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 // Load an accessible quotation and its items for invoice conversion.
 async function getQuotationInvoiceData(connection, quotationId, ownerId) {
   const ownerCondition =
@@ -290,7 +404,8 @@ async function getQuotationInvoiceData(connection, quotationId, ownerId) {
        terms_and_conditions
      FROM quotations
      WHERE quotation_id = ? ${ownerCondition}
-     LIMIT 1`,
+     LIMIT 1
+     FOR UPDATE`,
     params
   );
 
@@ -328,7 +443,7 @@ async function createInvoice(
   invoice,
   items = [],
   quotationOwnerId,
-  { returnDetails = false } = {}
+  { returnDetails = false, approvalStatus = "Not Required" } = {}
 ) {
   const connection = await db.getConnection();
   let invoiceNumberLock;
@@ -338,8 +453,10 @@ async function createInvoice(
 
     let invoiceData = invoice;
     let invoiceItems = items;
+    let quotationPayments = [];
+    let verifiedPayments = [];
 
-    // A linked quotation supplies the customer and, when omitted, the invoice items.
+    // A linked quotation is the authoritative source for invoice details.
     if (invoice.quotation_id) {
       const { quotation, items: quotationItems } =
         await getQuotationInvoiceData(
@@ -347,6 +464,22 @@ async function createInvoice(
           invoice.quotation_id,
           quotationOwnerId
         );
+
+      const [existingInvoices] = await connection.execute(
+        `SELECT invoice_id
+         FROM invoices
+         WHERE quotation_id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [quotation.quotation_id]
+      );
+      if (existingInvoices.length > 0) {
+        const error = new Error(
+          "This quotation has already been converted to an invoice."
+        );
+        error.code = "QUOTATION_ALREADY_INVOICED";
+        throw error;
+      }
 
       if (
         invoice.customer_id &&
@@ -359,32 +492,52 @@ async function createInvoice(
         throw error;
       }
 
+      [quotationPayments] = await connection.execute(
+        `SELECT payment_id, amount, payment_status
+         FROM payments
+         WHERE quotation_id = ?
+           AND invoice_id IS NULL
+         ORDER BY payment_id ASC`,
+        [invoice.quotation_id]
+      );
+      verifiedPayments = quotationPayments.filter(
+        (payment) => payment.payment_status === "Verified"
+      );
+      if (verifiedPayments.length === 0) {
+        const error = new Error(
+          "At least one verified payment is required before creating an invoice from a quotation."
+        );
+        error.code = "VERIFIED_PAYMENT_REQUIRED";
+        throw error;
+      }
+
+      const verifiedAmount = roundMoney(
+        verifiedPayments.reduce(
+          (total, payment) => total + Number(payment.amount),
+          0
+        )
+      );
       invoiceData = {
         ...invoice,
+        invoice_number: undefined,
+        quotation_id: quotation.quotation_id,
         customer_id: quotation.customer_id,
-        currency: invoice.currency || quotation.currency,
-        ...(invoiceItems.length === 0
-          ? {
-              discount_type: "fixed",
-              discount_value: quotation.discount_amount,
-              amount_paid: 0,
-              notes: invoice.notes ?? quotation.notes,
-              terms_and_conditions:
-                invoice.terms_and_conditions ?? quotation.terms_and_conditions,
-            }
-          : {}),
+        currency: quotation.currency || "LKR",
+        amount_paid: verifiedAmount,
+        discount_type: "fixed",
+        discount_value: Number(quotation.discount_amount || 0),
+        notes: quotation.notes,
+        terms_and_conditions: quotation.terms_and_conditions,
       };
 
-      if (invoiceItems.length === 0) {
-        invoiceItems = quotationItems;
-      }
+      invoiceItems = quotationItems;
     }
 
     const calculated = calculateInvoiceAmounts(invoiceData, invoiceItems);
     invoiceData = calculated.invoice;
     invoiceItems = calculated.items;
 
-    // Generate the invoice number only when the caller did not provide one.
+    // Generate a unique invoice number when the request does not provide one.
     if (!invoiceData.invoice_number) {
       const generated = await generateInvoiceNumber(
         connection,
@@ -402,6 +555,8 @@ async function createInvoice(
       currency: invoiceData.currency || "LKR",
       status: invoiceData.status || "Draft",
     });
+    fields.push("approval_status");
+    values.push(approvalStatus);
     fields.push("created_by");
     values.push(invoiceData.created_by ?? null);
 
@@ -432,6 +587,24 @@ async function createInvoice(
           item.line_total,
         ]
       );
+    }
+
+    if (invoiceData.quotation_id) {
+      const [linkResult] = await connection.execute(
+        `UPDATE payments
+         SET invoice_id = ?
+         WHERE quotation_id = ?
+           AND invoice_id IS NULL`,
+        [invoiceId, invoiceData.quotation_id]
+      );
+
+      if (linkResult.affectedRows !== quotationPayments.length) {
+        const error = new Error(
+          "Quotation payments changed while the invoice was being created."
+        );
+        error.code = "QUOTATION_PAYMENTS_CHANGED";
+        throw error;
+      }
     }
 
     // Commit the invoice and all line items together.
@@ -474,7 +647,7 @@ async function updateInvoice(invoiceId, invoice, items, createdBy) {
     const ownerParams =
       createdBy === undefined || createdBy === null ? [] : [createdBy];
     const [existing] = await connection.execute(
-      `SELECT invoice_id
+      `SELECT invoice_id, amount_paid, status
        FROM invoices
        WHERE invoice_id = ? ${ownerCondition}
        FOR UPDATE`,
@@ -488,9 +661,20 @@ async function updateInvoice(invoiceId, invoice, items, createdBy) {
 
     const customerId = await resolveCustomerId(connection, invoice);
     const calculated = calculateInvoiceAmounts(
-      { ...invoice, customer_id: customerId },
+      {
+        ...invoice,
+        customer_id: customerId,
+        amount_paid: Number(existing[0].amount_paid),
+      },
       items
     );
+    const updatedStatus =
+      calculated.invoice.balance_due === 0
+        ? "Paid"
+        : (invoice.status || existing[0].status) === "Paid"
+          ? "Issued"
+          : invoice.status || existing[0].status;
+    calculated.invoice.status = updatedStatus;
     const { fields, values } = getInvoiceValues({
       ...calculated.invoice,
     });
@@ -531,7 +715,17 @@ async function updateInvoice(invoiceId, invoice, items, createdBy) {
     }
 
     await connection.commit();
-    return true;
+    return {
+      invoice_id: invoiceId,
+      currency: calculated.invoice.currency,
+      subtotal: calculated.invoice.subtotal,
+      discount_amount: calculated.invoice.discount_amount,
+      tax_amount: calculated.invoice.tax_amount,
+      total_amount: calculated.invoice.total_amount,
+      amount_paid: calculated.invoice.amount_paid,
+      balance_due: calculated.invoice.balance_due,
+      status: updatedStatus,
+    };
   } catch (error) {
     await connection.rollback();
     throw error;
@@ -566,6 +760,20 @@ async function deleteInvoice(invoiceId, createdBy) {
     if (invoices.length === 0) {
       await connection.rollback();
       return false;
+    }
+
+    const [[paymentCount]] = await connection.execute(
+      `SELECT COUNT(*) AS payment_count
+       FROM payments
+       WHERE invoice_id = ?`,
+      [invoiceId]
+    );
+    if (Number(paymentCount.payment_count) > 0) {
+      const error = new Error(
+        "Invoices with payment records cannot be deleted."
+      );
+      error.code = "INVOICE_HAS_PAYMENTS";
+      throw error;
     }
 
     await connection.execute(
@@ -641,6 +849,12 @@ async function recordInvoicePayment(
     const newBalance = roundMoney(Number(invoice.total_amount) - amountPaid);
 
     // Preserve each payment as a separate record in the payment history.
+    const paymentType =
+      newBalance === 0
+        ? "Full Payment"
+        : Number(invoice.amount_paid) === 0
+          ? "Advance"
+          : "Partial";
     const [result] = await connection.execute(
       `INSERT INTO payments (
          invoice_id,
@@ -649,8 +863,12 @@ async function recordInvoicePayment(
          amount,
          payment_method,
          reference_number,
-         notes
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         notes,
+         payment_type,
+         payment_status,
+         verified_by,
+         verified_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Verified', ?, NOW())`,
       [
         invoiceId,
         receivedBy ?? null,
@@ -659,6 +877,8 @@ async function recordInvoicePayment(
         payment.payment_method || "Other",
         payment.reference_number?.trim() || null,
         payment.notes?.trim() || null,
+        paymentType,
+        receivedBy ?? null,
       ]
     );
 
@@ -690,7 +910,9 @@ async function recordInvoicePayment(
 
 module.exports = {
   getAllInvoices,
+  getPendingInvoiceApprovals,
   getInvoiceById,
+  reviewInvoiceApproval,
   createInvoice,
   updateInvoice,
   deleteInvoice,

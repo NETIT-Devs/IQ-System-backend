@@ -6,6 +6,7 @@ const {
   getMostQuotedCustomers,
 } = require("../models/customerModel");
 const { createAuditLog } = require("../models/auditLogModel");
+const { normalizePeriod } = require("../utils/periodFilter");
 
 // --------------------------------------------------
 // Get all customers
@@ -14,19 +15,17 @@ const { createAuditLog } = require("../models/auditLogModel");
 async function getCustomers(req, res) {
   try {
     const search = String(req.query.search || "").trim();
-    const period = String(req.query.period || "").trim();
-    const allowedPeriods = ["", "today", "last7days", "thismonth"];
-
-    if (!allowedPeriods.includes(period)) {
+    const period = normalizePeriod(req.query.period);
+    if (!period) {
       return res.status(400).json({
         success: false,
-        message: "Invalid period. Allowed: today, last7days, thismonth.",
+        message: "Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.",
       });
     }
 
     const [customers, summary] = await Promise.all([
       getAllCustomers({ search, period }),
-      getCustomerOverview(),
+      getCustomerOverview(period),
     ]);
 
     return res.status(200).json({
@@ -129,7 +128,15 @@ async function addCustomer(req, res) {
 
 async function getMostQuotedCustomersController(req, res) {
   try {
-    const customers = await getMostQuotedCustomers();
+    const period = normalizePeriod(req.query.period);
+    if (!period) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.",
+      });
+    }
+
+    const customers = await getMostQuotedCustomers(period);
 
     return res.status(200).json({
       success: true,

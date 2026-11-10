@@ -1,4 +1,17 @@
 const AdminDashboardModel = require('../models/adminDashboardModel');
+const { normalizePeriod } = require("../utils/periodFilter");
+
+function getDashboardPeriod(req, res) {
+  const period = normalizePeriod(req.query.period);
+  if (!period) {
+    res.status(400).json({
+      success: false,
+      message: "Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.",
+    });
+    return null;
+  }
+  return period;
+}
 
 function getDashboardOwnerId(req) {
   return req.user?.role === "Super Admin" ? undefined : req.user?.user_id;
@@ -8,9 +21,13 @@ function getDashboardOwnerId(req) {
 // @route   GET /api/admin/dashboard/overview
 // @access  Private (Admin & Super Admin)
 exports.getOverview = async (req, res) => {
+  const period = getDashboardPeriod(req, res);
+  if (!period) return;
+
   try {
     const stats = await AdminDashboardModel.getOverviewStats(
-      getDashboardOwnerId(req)
+      getDashboardOwnerId(req),
+      period
     );
     res.status(200).json({
       success: true,
@@ -26,9 +43,13 @@ exports.getOverview = async (req, res) => {
 // @route   GET /api/admin/dashboard/financial-overview
 // @access  Private (Admin & Super Admin)
 exports.getFinancialOverview = async (req, res) => {
+  const period = getDashboardPeriod(req, res);
+  if (!period) return;
+
   try {
     const financialData = await AdminDashboardModel.getFinancialOverview(
-      getDashboardOwnerId(req)
+      getDashboardOwnerId(req),
+      period
     );
     res.status(200).json({
       success: true,
@@ -44,9 +65,13 @@ exports.getFinancialOverview = async (req, res) => {
 // @route   GET /api/admin/dashboard/invoice-status
 // @access  Private (Admin & Super Admin)
 exports.getInvoiceStatus = async (req, res) => {
+  const period = getDashboardPeriod(req, res);
+  if (!period) return;
+
   try {
     const statusSummary = await AdminDashboardModel.getInvoiceStatusSummary(
-      getDashboardOwnerId(req)
+      getDashboardOwnerId(req),
+      period
     );
     res.status(200).json({
       success: true,

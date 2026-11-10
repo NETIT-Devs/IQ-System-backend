@@ -1,18 +1,30 @@
 
 const db = require("../config/db");
+const { getPeriodCondition, normalizePeriod } = require("../utils/periodFilter");
+
+function getDashboardPeriod(period) {
+  const normalized = normalizePeriod(period);
+  if (!normalized) {
+    throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
+  }
+  return normalized;
+}
 
 const AdminDashboardModel = {
   // 1. Overview Cards Stats
-  getOverviewStats: async (createdBy) => {
+  getOverviewStats: async (createdBy, requestedPeriod) => {
+    const period = getDashboardPeriod(requestedPeriod);
     const [customerCount] = await db.query(`
       SELECT COUNT(*) AS totalCustomers
       FROM customers
+      WHERE ${getPeriodCondition("created_at", period)}
     `);
 
     const [quotationCount] = await db.query(`
       SELECT COUNT(*) AS totalQuotations
       FROM quotations
-      ${createdBy == null ? "" : "WHERE created_by = ?"}
+      WHERE ${getPeriodCondition("quotation_date", period)}
+      ${createdBy == null ? "" : "AND created_by = ?"}
     `, createdBy == null ? [] : [createdBy]);
 
     const [invoiceCount] = await db.query(`
@@ -25,7 +37,8 @@ const AdminDashboardModel = {
           END
         ), 0) AS outstandingBalance
       FROM invoices
-      ${createdBy == null ? "" : "WHERE created_by = ?"}
+      WHERE ${getPeriodCondition("invoice_date", period)}
+      ${createdBy == null ? "" : "AND created_by = ?"}
     `, createdBy == null ? [] : [createdBy]);
 
     return {
@@ -37,13 +50,15 @@ const AdminDashboardModel = {
   },
 
   // 2. Financial Overview (Income vs Expenses)
-  getFinancialOverview: async (createdBy) => {
+  getFinancialOverview: async (createdBy, requestedPeriod) => {
+    const period = getDashboardPeriod(requestedPeriod);
     const [incomeResult] = await db.query(`
       SELECT COALESCE(SUM(p.amount), 0) AS totalIncome
       FROM payments p
       INNER JOIN invoices i
         ON i.invoice_id = p.invoice_id
-      ${createdBy == null ? "" : "WHERE i.created_by = ?"}
+      WHERE ${getPeriodCondition("p.payment_date", period)}
+      ${createdBy == null ? "" : "AND i.created_by = ?"}
     `, createdBy == null ? [] : [createdBy]);
 
     return {
@@ -53,7 +68,8 @@ const AdminDashboardModel = {
   },
 
   // 3. Invoice Status Distribution
-  getInvoiceStatusSummary: async (createdBy) => {
+  getInvoiceStatusSummary: async (createdBy, requestedPeriod) => {
+    const period = getDashboardPeriod(requestedPeriod);
     const [rows] = await db.query(`
       SELECT
         COUNT(*) AS totalInvoices,
@@ -90,7 +106,8 @@ const AdminDashboardModel = {
         ), 0) AS partiallyPaid
 
       FROM invoices
-      ${createdBy == null ? "" : "WHERE created_by = ?"}
+      WHERE ${getPeriodCondition("invoice_date", period)}
+      ${createdBy == null ? "" : "AND created_by = ?"}
     `, createdBy == null ? [] : [createdBy]);
 
     return {

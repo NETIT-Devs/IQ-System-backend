@@ -98,19 +98,52 @@ function createInvoicePdf(invoice, company = {}) {
       });
     }
 
-    // Add a visible stamp to fully paid invoices.
-    if (invoice.status === "Paid") {
+    const paymentHistory = invoice.payment_history || [];
+    const hasVerifiedPayment = paymentHistory.some(
+      (payment) => payment.payment_status === "Verified"
+    );
+    const hasAdvancePayment = paymentHistory.some(
+      (payment) => payment.payment_type === "Advance"
+    );
+    const showPaidSeal = invoice.status === "Paid" || hasVerifiedPayment;
+    const sealWidth = 100;
+    const sealGap = 8;
+    const sealCount = Number(showPaidSeal) + Number(hasAdvancePayment);
+    const sealStartX =
+      rightEdge - sealCount * sealWidth - Math.max(0, sealCount - 1) * sealGap;
+
+    if (showPaidSeal) {
+      const paidX = hasAdvancePayment ? sealStartX : rightEdge - sealWidth;
       doc
-        .roundedRect(rightEdge - 105, 128, 105, 25, 4)
+        .roundedRect(paidX, 128, sealWidth, 25, 4)
+        .lineWidth(2)
+        .strokeColor("#DC2626")
+        .stroke();
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(12)
+        .fillColor("#DC2626")
+        .text("PAID", paidX, 134, {
+          width: sealWidth,
+          align: "center",
+        });
+    }
+
+    if (hasAdvancePayment) {
+      const advanceX = showPaidSeal
+        ? sealStartX + sealWidth + sealGap
+        : rightEdge - sealWidth;
+      doc
+        .roundedRect(advanceX, 128, sealWidth, 25, 4)
         .lineWidth(2)
         .strokeColor("#16803C")
         .stroke();
       doc
         .font("Helvetica-Bold")
-        .fontSize(13)
+        .fontSize(11)
         .fillColor("#16803C")
-        .text("PAID", rightEdge - 105, 134, {
-          width: 105,
+        .text("ADVANCE", advanceX, 134, {
+          width: sealWidth,
           align: "center",
         });
     }
@@ -217,6 +250,76 @@ function createInvoicePdf(invoice, company = {}) {
       });
       y += 18;
     });
+
+    if (paymentHistory.length > 0) {
+      y += 12;
+      if (y > 700) {
+        doc.addPage();
+        y = 55;
+      }
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(10)
+        .fillColor("#17365D")
+        .text("Payment History", 48, y);
+      y += 18;
+
+      const drawPaymentHeader = () => {
+        doc.rect(48, y, rightEdge - 48, 22).fill("#17365D");
+        doc.font("Helvetica-Bold").fontSize(8).fillColor("#FFFFFF");
+        doc.text("Date", 53, y + 7, { width: 58 });
+        doc.text("Method / Type", 115, y + 7, { width: 105 });
+        doc.text("Status", 225, y + 7, { width: 58 });
+        doc.text("Reference", 287, y + 7, { width: 88 });
+        doc.text("Slip", 378, y + 7, { width: 82 });
+        doc.text("Amount", 466, y + 7, { width: 75, align: "right" });
+        y += 22;
+      };
+
+      drawPaymentHeader();
+      paymentHistory.forEach((payment, index) => {
+        if (y > 740) {
+          doc.addPage();
+          y = 55;
+          drawPaymentHeader();
+        }
+
+        const rowHeight = 22;
+        if (index % 2 === 0) {
+          doc.rect(48, y, rightEdge - 48, rowHeight).fill("#F3F6FA");
+        }
+        doc.font("Helvetica").fontSize(7).fillColor("#1F2937");
+        doc.text(String(payment.payment_date || "").slice(0, 10), 53, y + 7, {
+          width: 58,
+        });
+        doc.text(
+          [payment.payment_method, payment.payment_type].filter(Boolean).join(" / "),
+          115,
+          y + 7,
+          { width: 105 }
+        );
+        doc.text(String(payment.payment_status || "-"), 225, y + 7, {
+          width: 58,
+        });
+        doc.text(String(payment.reference_number || "-"), 287, y + 7, {
+          width: 88,
+        });
+        doc.text(
+          payment.payment_slip
+            ? path.basename(String(payment.payment_slip))
+            : "-",
+          378,
+          y + 7,
+          { width: 82 }
+        );
+        doc.text(formatMoney(payment.amount, currency), 466, y + 7, {
+          width: 75,
+          align: "right",
+        });
+        y += rowHeight;
+      });
+    }
 
     if (invoice.notes || invoice.terms_and_conditions || signaturePath) {
       y += 12;

@@ -1,4 +1,5 @@
 const db = require("../config/db");
+const { getPeriodCondition } = require("../utils/periodFilter");
 
 function buildDateFilter(column, filters, params) {
   const conditions = [];
@@ -11,6 +12,10 @@ function buildDateFilter(column, filters, params) {
   if (filters.endDate) {
     conditions.push(`${column} < DATE_ADD(?, INTERVAL 1 DAY)`);
     params.push(filters.endDate);
+  }
+
+  if (!filters.startDate && !filters.endDate) {
+    conditions.push(getPeriodCondition(column, filters.period));
   }
 
   return conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -130,17 +135,7 @@ async function getMonthlyIncome(filters) {
   }
 
   const params = [];
-  let dateFilter;
-
-  if (filters.startDate || filters.endDate) {
-    dateFilter = buildDateFilter(`\`${dateColumn}\``, filters, params);
-  } else {
-    dateFilter = `WHERE \`${dateColumn}\` IS NOT NULL
-      AND \`${dateColumn}\` >= DATE_SUB(
-      DATE_FORMAT(CURDATE(), '%Y-%m-01'),
-      INTERVAL 5 MONTH
-    )`;
-  }
+  const dateFilter = buildDateFilter(`\`${dateColumn}\``, filters, params);
 
   const [rows] = await db.execute(
     `SELECT

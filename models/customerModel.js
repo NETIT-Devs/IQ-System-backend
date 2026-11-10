@@ -1,28 +1,28 @@
 
 const db = require("../config/db");
+const { getPeriodCondition, normalizePeriod } = require("../utils/periodFilter");
 
 // --------------------------------------------------
 // Get all customers
 // --------------------------------------------------
 
-async function getAllCustomers({ search = "", period = "" } = {}) {
+async function getAllCustomers({ search = "", period: requestedPeriod } = {}) {
   const conditions = [];
   const params = [];
+  const period = normalizePeriod(requestedPeriod);
+
+  if (!period) {
+    throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
+  }
 
   if (search) {
-    conditions.push("customer_name LIKE ?");
-    params.push(`%${search}%`);
+    conditions.push(
+      "(customer_name LIKE ? OR CAST(customer_id AS CHAR) LIKE ?)"
+    );
+    params.push(`%${search}%`, `%${search}%`);
   }
 
-  if (period === "today") {
-    conditions.push("DATE(created_at) = CURDATE()");
-  } else if (period === "last7days") {
-    conditions.push("created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)");
-  } else if (period === "thismonth") {
-    conditions.push(
-      "created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND created_at < DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY)"
-    );
-  }
+  conditions.push(getPeriodCondition("created_at", period));
 
   const [rows] = await db.execute(
     `SELECT
@@ -188,18 +188,27 @@ async function createCustomer(
 }
 
 // Database-calculated customer overview for the customers page.
-async function getCustomerOverview() {
+async function getCustomerOverview(requestedPeriod = "1w") {
+  const period = normalizePeriod(requestedPeriod);
+  if (!period) {
+    throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
+  }
+  const customerPeriod = getPeriodCondition("created_at", period);
+  const quotationPeriod = getPeriodCondition("quotation_date", period);
+
   const [[customerSummary]] = await db.execute(
     `SELECT
        COUNT(*) AS total_customers,
        COALESCE(SUM(DATE(created_at) = CURDATE()), 0) AS customers_added_today
-     FROM customers`
+     FROM customers
+     WHERE ${customerPeriod}`
   );
 
   const [[quotationSummary]] = await db.execute(
     `SELECT COUNT(*) AS accepted_quotations
      FROM quotations
-     WHERE customer_status IN ('Customer Accepted', 'Accepted')`
+     WHERE customer_status IN ('Customer Accepted', 'Accepted')
+       AND ${quotationPeriod}`
   );
 
   return {
@@ -213,7 +222,13 @@ async function getCustomerOverview() {
 // Get most quoted customers
 // --------------------------------------------------
 
-async function getMostQuotedCustomers() {
+async function getMostQuotedCustomers(requestedPeriod = "1w") {
+  const period = normalizePeriod(requestedPeriod);
+  if (!period) {
+    throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
+  }
+  const quotationPeriod = getPeriodCondition("q.quotation_date", period);
+
   const [rows] = await db.execute(
     `SELECT
        c.customer_id,
@@ -227,6 +242,7 @@ async function getMostQuotedCustomers() {
      INNER JOIN quotations q
        ON q.customer_id = c.customer_id
      WHERE q.status <> 'Cancelled'
+       AND ${quotationPeriod}
      GROUP BY
        c.customer_id,
        c.customer_name,

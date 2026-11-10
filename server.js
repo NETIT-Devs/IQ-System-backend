@@ -13,6 +13,7 @@ const authRoutes = require("./routes/authRoutes");
 const customerRoutes = require("./routes/customerRoutes");
 const quotationRoutes = require("./routes/quotationRoutes");
 const invoiceRoutes = require("./routes/invoiceRoutes");
+const paymentRoutes = require("./routes/paymentRoutes");
 const auditLogRoutes = require("./routes/auditLogRoutes");
 const companySettingsRoutes = require("./routes/companySettingsRoutes");
 const userRoutes = require("./routes/userRoutes");
@@ -45,6 +46,9 @@ app.use("/api/quotations", quotationRoutes);
 
 // Invoice API
 app.use("/api/invoices", invoiceRoutes);
+
+// Payment API
+app.use("/api/payments", paymentRoutes);
 
 // Audit log API
 app.use("/api/audit-logs", auditLogRoutes);

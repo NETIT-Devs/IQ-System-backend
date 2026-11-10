@@ -1,6 +1,7 @@
 
 const db = require("../config/db");
 const { createCustomer } = require("./customerModel");
+const { getPeriodCondition, normalizePeriod } = require("../utils/periodFilter");
 
 // Build quotation list filters.
 function buildQuotationFilters(filters = {}) {
@@ -24,7 +25,7 @@ function buildQuotationFilters(filters = {}) {
   ];
 
   const {
-    period,
+    period: requestedPeriod,
     status,
     approval_status,
     search,
@@ -32,27 +33,18 @@ function buildQuotationFilters(filters = {}) {
     to_date,
     created_by,
   } = filters;
+  const period = normalizePeriod(requestedPeriod);
+  if (!period) {
+    throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
+  }
 
   if (created_by !== undefined && created_by !== null) {
     conditions.push("q.created_by = ?");
     params.push(created_by);
   }
 
-  if (period && period !== "all") {
-    const periodMap = {
-      "1w": "7 DAY",
-      "1m": "1 MONTH",
-      "1y": "1 YEAR",
-      "2y": "2 YEAR",
-    };
-
-    if (!periodMap[period]) {
-      throw new Error("Invalid date period.");
-    }
-
-    conditions.push(
-      `q.quotation_date >= DATE_SUB(CURDATE(), INTERVAL ${periodMap[period]})`
-    );
+  if (!from_date && !to_date) {
+    conditions.push(getPeriodCondition("q.quotation_date", period));
   }
 
   if (from_date || to_date) {
@@ -135,6 +127,18 @@ async function getAllQuotations(filters = {}) {
       q.discount_amount,
       q.tax_amount,
       q.total_amount,
+      COALESCE(payment_totals.verified_amount, 0) AS amount_paid,
+      GREATEST(
+        q.total_amount - COALESCE(payment_totals.verified_amount, 0),
+        0
+      ) AS remaining_amount,
+      COALESCE(payment_totals.pending_amount, 0) AS pending_payment_amount,
+      GREATEST(
+        q.total_amount
+          - COALESCE(payment_totals.verified_amount, 0)
+          - COALESCE(payment_totals.pending_amount, 0),
+        0
+      ) AS available_payment_amount,
       q.status,
       q.customer_status,
       q.approval_status,
@@ -146,6 +150,17 @@ async function getAllQuotations(filters = {}) {
     FROM quotations q
     INNER JOIN customers c
       ON q.customer_id = c.customer_id
+    LEFT JOIN (
+      SELECT
+        quotation_id,
+        SUM(CASE WHEN payment_status = 'Verified' THEN amount ELSE 0 END)
+          AS verified_amount,
+        SUM(CASE WHEN payment_status = 'Pending' THEN amount ELSE 0 END)
+          AS pending_amount
+      FROM payments
+      GROUP BY quotation_id
+    ) payment_totals
+      ON payment_totals.quotation_id = q.quotation_id
     ${where}
     ORDER BY q.quotation_id DESC
     `,
@@ -206,6 +221,18 @@ async function getQuotationById(quotationId, createdBy) {
       q.discount_amount,
       q.tax_amount,
       q.total_amount,
+      COALESCE(payment_totals.verified_amount, 0) AS amount_paid,
+      GREATEST(
+        q.total_amount - COALESCE(payment_totals.verified_amount, 0),
+        0
+      ) AS remaining_amount,
+      COALESCE(payment_totals.pending_amount, 0) AS pending_payment_amount,
+      GREATEST(
+        q.total_amount
+          - COALESCE(payment_totals.verified_amount, 0)
+          - COALESCE(payment_totals.pending_amount, 0),
+        0
+      ) AS available_payment_amount,
       q.status,
       q.customer_status,
       q.approval_status,
@@ -217,6 +244,17 @@ async function getQuotationById(quotationId, createdBy) {
     FROM quotations q
     INNER JOIN customers c
       ON q.customer_id = c.customer_id
+    LEFT JOIN (
+      SELECT
+        quotation_id,
+        SUM(CASE WHEN payment_status = 'Verified' THEN amount ELSE 0 END)
+          AS verified_amount,
+        SUM(CASE WHEN payment_status = 'Pending' THEN amount ELSE 0 END)
+          AS pending_amount
+      FROM payments
+      GROUP BY quotation_id
+    ) payment_totals
+      ON payment_totals.quotation_id = q.quotation_id
     WHERE q.quotation_id = ?
       ${ownerCondition}
     LIMIT 1`,

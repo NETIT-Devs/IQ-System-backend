@@ -2,13 +2,33 @@ const invoiceModel = require("../models/invoiceModel");
 const { getCompanySettings } = require("../models/companySettingsModel");
 const { createEmailTransporter } = require("../config/email");
 const { createInvoicePdf } = require("../utils/invoicePdf");
-const { createNotificationsForRole } = require("../models/notificationModel");
+const { createAuditLog } = require("../models/auditLogModel");
+const {
+  createNotification,
+  createNotificationsForRole,
+} = require("../models/notificationModel");
+const { normalizePeriod } = require("../utils/periodFilter");
 
 async function notifySuperAdmins(notification) {
   try {
     await createNotificationsForRole("Super Admin", notification);
   } catch (error) {
     console.error("Create invoice notification error:", error);
+  }
+}
+
+async function notifyInvoiceCreator(invoice, notification) {
+  if (!invoice?.created_by) return;
+
+  try {
+    await createNotification({
+      ...notification,
+      userId: invoice.created_by,
+      referenceType: "invoice",
+      referenceId: invoice.invoice_id,
+    });
+  } catch (error) {
+    console.error("Create invoice decision notification error:", error);
   }
 }
 
@@ -107,6 +127,14 @@ async function sendInvoiceEmail(req, res) {
       ],
     });
 
+    await createAuditLog({
+      userId: req.user.user_id,
+      userRole: req.user.role,
+      action: "Invoice Emailed",
+      recordId: invoice.invoice_id,
+      details: `Emailed invoice ${invoiceNumber} to ${invoice.customer_email}.`,
+    });
+
     return res.status(200).json({
       success: true,
       message: "Invoice emailed successfully.",
@@ -157,11 +185,12 @@ function getCustomerData(invoice) {
 // Validate invoice fields, customer selection, dates, discounts, and line items.
 function validateInvoice(invoice, items) {
   const quotationId = Number(invoice.quotation_id);
-  // Allow the model to source items and totals from a linked quotation.
   const canUseQuotationItems =
+    invoice.quotation_id !== undefined &&
+    invoice.quotation_id !== null &&
+    invoice.quotation_id !== "" &&
     Number.isInteger(quotationId) &&
-    quotationId > 0 &&
-    (!Array.isArray(items) || items.length === 0);
+    quotationId > 0;
   const requiredFields = ["invoice_date"];
 
   for (const field of requiredFields) {
@@ -175,6 +204,7 @@ function validateInvoice(invoice, items) {
   }
 
   if (
+    !canUseQuotationItems &&
     invoice.invoice_number !== undefined &&
     invoice.invoice_number !== null &&
     invoice.invoice_number !== "" &&
@@ -247,6 +277,7 @@ function validateInvoice(invoice, items) {
   }
 
   if (
+    !canUseQuotationItems &&
     invoice.discount_type !== undefined &&
     !["fixed", "percentage"].includes(invoice.discount_type)
   ) {
@@ -254,17 +285,19 @@ function validateInvoice(invoice, items) {
   }
 
   if (
-    (invoice.discount_value !== undefined &&
+    !canUseQuotationItems &&
+    ((invoice.discount_value !== undefined &&
       (!Number.isFinite(Number(invoice.discount_value)) ||
         Number(invoice.discount_value) < 0)) ||
-    (invoice.discount_amount !== undefined &&
-      (!Number.isFinite(Number(invoice.discount_amount)) ||
-        Number(invoice.discount_amount) < 0))
+      (invoice.discount_amount !== undefined &&
+        (!Number.isFinite(Number(invoice.discount_amount)) ||
+          Number(invoice.discount_amount) < 0)))
   ) {
     return "Discount must be a non-negative number.";
   }
 
   if (
+    !canUseQuotationItems &&
     invoice.discount_type === "percentage" &&
     Number(invoice.discount_value ?? invoice.discount_amount ?? 0) > 100
   ) {
@@ -272,6 +305,7 @@ function validateInvoice(invoice, items) {
   }
 
   if (
+    !canUseQuotationItems &&
     invoice.amount_paid !== undefined &&
     (!Number.isFinite(Number(invoice.amount_paid)) ||
       Number(invoice.amount_paid) < 0)
@@ -280,6 +314,7 @@ function validateInvoice(invoice, items) {
   }
 
   if (
+    !canUseQuotationItems &&
     invoice.currency !== undefined &&
     (typeof invoice.currency !== "string" ||
       !/^[A-Za-z]{3}$/.test(invoice.currency))
@@ -326,8 +361,19 @@ function validateInvoice(invoice, items) {
 
 // Return the invoices visible to the authenticated user.
 async function getInvoices(req, res) {
+  const period = normalizePeriod(req.query.period);
+  if (!period) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.",
+    });
+  }
+
   try {
-    const invoices = await invoiceModel.getAllInvoices(getOwnerId(req));
+    const invoices = await invoiceModel.getAllInvoices(
+      getOwnerId(req),
+      period
+    );
 
     return res.status(200).json({
       success: true,
@@ -340,6 +386,164 @@ async function getInvoices(req, res) {
     return res.status(500).json({
       success: false,
       message: "Failed to retrieve invoices.",
+    });
+  }
+}
+
+// List invoices awaiting Super Admin review.
+async function getPendingInvoiceApprovals(req, res) {
+  const period = normalizePeriod(req.query.period);
+  if (!period) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.",
+    });
+  }
+
+  try {
+    const invoices = await invoiceModel.getPendingInvoiceApprovals(period);
+    return res.status(200).json({
+      success: true,
+      count: invoices.length,
+      invoices,
+    });
+  } catch (error) {
+    console.error("Get pending invoice approvals error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve pending invoice approvals.",
+    });
+  }
+}
+
+// Approve an invoice that is waiting for Super Admin review.
+async function approveInvoice(req, res) {
+  const invoiceId = Number(req.params.id);
+  if (!Number.isInteger(invoiceId) || invoiceId <= 0) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid invoice ID.",
+    });
+  }
+
+  try {
+    const invoice = await invoiceModel.reviewInvoiceApproval(
+      invoiceId,
+      req.user.user_id,
+      "Approved"
+    );
+    if (!invoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice not found.",
+      });
+    }
+
+    await createAuditLog({
+      userId: req.user.user_id,
+      userRole: req.user.role,
+      action: "Invoice Approved",
+      recordId: invoiceId,
+      details: `Approved invoice ${invoice.invoice_number}.`,
+    });
+    await notifyInvoiceCreator(invoice, {
+      title: "Invoice Approved",
+      message: `Your invoice ${invoice.invoice_number} has been approved.`,
+      type: "success",
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Invoice approved successfully.",
+      invoice_id: invoiceId,
+      invoice_number: invoice.invoice_number,
+      approval_status: "Approved",
+    });
+  } catch (error) {
+    if (error.code === "INVOICE_NOT_PENDING") {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    console.error("Approve invoice error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to approve invoice.",
+    });
+  }
+}
+
+// Reject an invoice that is waiting for Super Admin review.
+async function rejectInvoice(req, res) {
+  const invoiceId = Number(req.params.id);
+  const rejectionReason =
+    typeof req.body?.rejection_reason === "string"
+      ? req.body.rejection_reason.trim()
+      : "";
+
+  if (!Number.isInteger(invoiceId) || invoiceId <= 0) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid invoice ID.",
+    });
+  }
+  if (!rejectionReason || rejectionReason.length > 2000) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "A rejection reason is required and must be 2000 characters or fewer.",
+    });
+  }
+
+  try {
+    const invoice = await invoiceModel.reviewInvoiceApproval(
+      invoiceId,
+      req.user.user_id,
+      "Rejected",
+      rejectionReason
+    );
+    if (!invoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice not found.",
+      });
+    }
+
+    await createAuditLog({
+      userId: req.user.user_id,
+      userRole: req.user.role,
+      action: "Invoice Rejected",
+      recordId: invoiceId,
+      details: `Rejected invoice ${invoice.invoice_number}. Reason: ${rejectionReason}`,
+    });
+    await notifyInvoiceCreator(invoice, {
+      title: "Invoice Rejected",
+      message: `Your invoice ${invoice.invoice_number} was rejected. Reason: ${rejectionReason}`,
+      type: "error",
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Invoice rejected successfully.",
+      invoice_id: invoiceId,
+      invoice_number: invoice.invoice_number,
+      approval_status: "Rejected",
+      rejection_reason: rejectionReason,
+    });
+  } catch (error) {
+    if (error.code === "INVOICE_NOT_PENDING") {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    console.error("Reject invoice error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to reject invoice.",
     });
   }
 }
@@ -402,14 +606,25 @@ async function addInvoice(req, res) {
       },
       Array.isArray(items) ? items : [],
       getOwnerId(req),
-      { returnDetails: true }
+      {
+        returnDetails: true,
+        approvalStatus: req.user.role === "Admin" ? "Pending" : "Not Required",
+      }
     );
+
+    await createAuditLog({
+      userId: req.user.user_id,
+      userRole: req.user.role,
+      action: "Invoice Created",
+      recordId: invoiceId,
+      details: `Created invoice ${invoiceNumber}.`,
+    });
 
     if (req.user.role === "Admin") {
       await notifySuperAdmins({
-        title: "New Invoice Created",
-        message: `Invoice ${invoiceNumber} is ready to review.`,
-        type: "info",
+        title: "Invoice Pending Approval",
+        message: `Invoice ${invoiceNumber} is waiting for your approval.`,
+        type: "warning",
         referenceType: "invoice",
         referenceId: invoiceId,
       });
@@ -420,6 +635,7 @@ async function addInvoice(req, res) {
       message: "Invoice created successfully.",
       invoice_id: invoiceId,
       invoice_number: invoiceNumber,
+      approval_status: req.user.role === "Admin" ? "Pending" : "Not Required",
     });
   } catch (error) {
     console.error("Create invoice error:", error);
@@ -469,10 +685,21 @@ async function addInvoice(req, res) {
       });
     }
 
+    if (
+      error.code === "VERIFIED_PAYMENT_REQUIRED" ||
+      error.code === "QUOTATION_PAYMENTS_CHANGED" ||
+      error.code === "QUOTATION_ALREADY_INVOICED"
+    ) {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
         success: false,
-        message: "Invoice number already exists.",
+        message: "Invoice number or quotation has already been used.",
       });
     }
 
@@ -510,23 +737,32 @@ async function editInvoice(req, res) {
   }
 
   try {
-    const updated = await invoiceModel.updateInvoice(
+    const updatedInvoice = await invoiceModel.updateInvoice(
       invoiceId,
       invoice,
       invoice.items,
       getOwnerId(req)
     );
 
-    if (!updated) {
+    if (!updatedInvoice) {
       return res.status(404).json({
         success: false,
         message: "Invoice not found.",
       });
     }
 
+    await createAuditLog({
+      userId: req.user.user_id,
+      userRole: req.user.role,
+      action: "Invoice Updated",
+      recordId: invoiceId,
+      details: `Updated invoice ${invoice.invoice_number || invoiceId}.`,
+    });
+
     return res.status(200).json({
       success: true,
       message: "Invoice updated successfully.",
+      invoice: updatedInvoice,
     });
   } catch (error) {
     console.error("Update invoice error:", error);
@@ -605,12 +841,27 @@ async function removeInvoice(req, res) {
       });
     }
 
+    await createAuditLog({
+      userId: req.user.user_id,
+      userRole: req.user.role,
+      action: "Invoice Deleted",
+      recordId: invoiceId,
+      details: `Deleted invoice ${invoice.invoice_number || invoiceId}.`,
+    });
+
     return res.status(200).json({
       success: true,
       message: "Draft invoice deleted successfully.",
     });
   } catch (error) {
     console.error("Delete invoice error:", error);
+
+    if (error.code === "INVOICE_HAS_PAYMENTS") {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
 
     return res.status(500).json({
       success: false,
@@ -699,6 +950,14 @@ async function recordPayment(req, res) {
       });
     }
 
+    await createAuditLog({
+      userId: req.user.user_id,
+      userRole: req.user.role,
+      action: "Invoice Payment Recorded",
+      recordId: invoiceId,
+      details: `Recorded payment ${result.payment_id} of ${amount} for invoice ${invoiceId}.`,
+    });
+
     return res.status(201).json({
       success: true,
       message:
@@ -748,8 +1007,11 @@ async function recordPayment(req, res) {
 
 module.exports = {
   getInvoices,
+  getPendingInvoiceApprovals,
   getInvoice,
   addInvoice,
+  approveInvoice,
+  rejectInvoice,
   editInvoice,
   removeInvoice,
   getInvoicePdf,

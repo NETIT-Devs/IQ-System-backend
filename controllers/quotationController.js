@@ -10,6 +10,7 @@ const {
 
 const { getActiveServices } = require("../models/serviceCatalogModel");
 const { createAuditLog } = require("../models/auditLogModel");
+const { normalizePeriod } = require("../utils/periodFilter");
 const {
   createNotification,
   createNotificationsForRole,
@@ -395,8 +396,15 @@ async function getQuotationItemOptions(req, res) {
 
 async function getQuotations(req, res) {
   try {
+    const period = normalizePeriod(req.query.period);
+    if (!period) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.",
+      });
+    }
+
     const {
-      period,
       status,
       approval_status,
       search,
@@ -418,6 +426,7 @@ async function getQuotations(req, res) {
       success: true,
       count: quotations.length,
       quotations,
+      period,
     });
   } catch (error) {
     console.error("Get quotations error:", error);

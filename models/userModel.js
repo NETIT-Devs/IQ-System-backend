@@ -1,5 +1,6 @@
 
 const db = require("../config/db");
+const { getPeriodCondition, normalizePeriod } = require("../utils/periodFilter");
 
 // Find a user by email
 async function findUserByEmail(email) {
@@ -26,10 +27,16 @@ async function createUser(fullName, email, passwordHash, role) {
   return result.insertId;
 }
 
-async function getAllUsers() {
+async function getAllUsers(requestedPeriod) {
+  const period = normalizePeriod(requestedPeriod);
+  if (!period) {
+    throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
+  }
+
   const [rows] = await db.execute(
     `SELECT user_id, full_name, email, role, is_active, created_at
      FROM users
+     WHERE ${getPeriodCondition("created_at", period)}
      ORDER BY user_id DESC`
   );
 

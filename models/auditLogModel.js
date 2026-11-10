@@ -1,4 +1,5 @@
 const db = require("../config/db");
+const { getPeriodCondition, normalizePeriod } = require("../utils/periodFilter");
 
 async function createAuditLog({
   userId = null,
@@ -34,7 +35,12 @@ async function createAuditLog({
   }
 }
 
-async function getAuditLogs() {
+async function getAuditLogs(requestedPeriod) {
+  const period = normalizePeriod(requestedPeriod);
+  if (!period) {
+    throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
+  }
+
   const [rows] = await db.execute(
     `SELECT
        log_id,
@@ -45,6 +51,7 @@ async function getAuditLogs() {
        details,
        created_at
      FROM audit_logs
+     WHERE ${getPeriodCondition("created_at", period)}
      ORDER BY created_at DESC, log_id DESC`
   );
 

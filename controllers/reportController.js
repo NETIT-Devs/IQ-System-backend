@@ -4,9 +4,18 @@ const {
   getQuotationReport,
   getMonthlyIncome,
 } = require("../models/reportModel");
+const { normalizePeriod } = require("../utils/periodFilter");
 
 function getDateFilters(req, res) {
   const { startDate, endDate } = req.query;
+  const period = normalizePeriod(req.query.period);
+  if (!period) {
+    res.status(400).json({
+      success: false,
+      message: "Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.",
+    });
+    return null;
+  }
   const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 
   for (const [label, value] of [
@@ -45,7 +54,7 @@ function getDateFilters(req, res) {
     return null;
   }
 
-  return { startDate, endDate };
+  return { startDate, endDate, period };
 }
 
 function handleReportError(res, error, reportName) {
