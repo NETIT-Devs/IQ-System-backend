@@ -16,6 +16,7 @@ const invoiceRoutes = require("./routes/invoiceRoutes");
 const auditLogRoutes = require("./routes/auditLogRoutes");
 const companySettingsRoutes = require("./routes/companySettingsRoutes");
 const userRoutes = require("./routes/userRoutes");
+const notificationRoutes = require("./routes/notificationRoutes");
 
 const app = express();
 
@@ -53,6 +54,9 @@ app.use("/api/company-settings", companySettingsRoutes);
 
 // User management API
 app.use("/api/users", userRoutes);
+
+// Notifications API
+app.use("/api/notifications", notificationRoutes);
 
 // 404 - Route not found
 app.use((req, res) => {

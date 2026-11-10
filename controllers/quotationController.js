@@ -10,6 +10,34 @@ const {
 
 const { getActiveServices } = require("../models/serviceCatalogModel");
 const { createAuditLog } = require("../models/auditLogModel");
+const {
+  createNotification,
+  createNotificationsForRole,
+} = require("../models/notificationModel");
+
+async function writeNotifications(notification, recipients) {
+  try {
+    await recipients(notification);
+  } catch (error) {
+    console.error("Create quotation notification error:", error);
+  }
+}
+
+async function notifyQuotationCreator(quotationId, buildNotification) {
+  try {
+    const quotation = await getQuotationById(quotationId);
+    if (!quotation?.created_by) return;
+
+    await createNotification({
+      ...buildNotification(quotation),
+      userId: quotation.created_by,
+      referenceType: "quotation",
+      referenceId: quotationId,
+    });
+  } catch (error) {
+    console.error("Notify quotation creator error:", error);
+  }
+}
 
 // --------------------------------------------------
 // Helpers
@@ -143,6 +171,7 @@ function validateQuotationData(body) {
   const allowedStatuses = [
     "Draft",
     "Sent",
+    "Pending Approval",
     "Approved",
     "Rejected",
     "Expired",
@@ -321,7 +350,8 @@ function validateQuotationData(body) {
       discount_amount: Number(discount.toFixed(2)),
       tax_amount: totalTax,
       total_amount: total,
-      status: status || "Draft",
+      status:
+        status === "Pending Approval" ? "Sent" : status || "Draft",
       approval_status: approval_status || "Not Required",
       notes: notes || null,
       terms_and_conditions: terms_and_conditions || null,
@@ -473,11 +503,16 @@ async function addQuotation(req, res) {
       });
     }
 
-    // Save finalized Super Admin quotations as approved in the database.
-    result.data.approval_status =
-      req.user.role === "Super Admin" && result.data.status === "Approved"
-        ? "Approved"
-        : "Not Required";
+    // Assign approval state from the authenticated role instead of trusting the submitted value.
+    if (req.user.role === "Super Admin") {
+      result.data.approval_status =
+        result.data.status === "Approved" ? "Approved" : "Not Required";
+    } else if (result.data.status === "Draft") {
+      result.data.approval_status = "Not Required";
+    } else {
+      result.data.status = "Sent";
+      result.data.approval_status = "Pending";
+    }
 
     const quotationId = await createQuotationWithItems(
       {
@@ -494,6 +529,20 @@ async function addQuotation(req, res) {
       recordId: quotationId,
       details: `Created quotation ${result.data.quotation_number} for ${result.data.customer_name}.`,
     });
+
+    if (result.data.approval_status === "Pending") {
+      await writeNotifications(
+        {
+          title: "Quotation Pending Approval",
+          message: `Quotation ${result.data.quotation_number} is waiting for your approval.`,
+          type: "warning",
+          referenceType: "quotation",
+          referenceId: quotationId,
+        },
+        (notification) =>
+          createNotificationsForRole("Super Admin", notification)
+      );
+    }
 
     return res.status(201).json({
       success: true,
@@ -781,6 +830,18 @@ async function submitQuotationForApproval(req, res) {
       details: `Submitted quotation ${quotation.quotation_number} for approval.`,
     });
 
+    await writeNotifications(
+      {
+        title: "Quotation Pending Approval",
+        message: `Quotation ${quotation.quotation_number} is waiting for your approval.`,
+        type: "warning",
+        referenceType: "quotation",
+        referenceId: quotationId,
+      },
+      (notification) =>
+        createNotificationsForRole("Super Admin", notification)
+    );
+
     return res.status(200).json({
       success: true,
       message: "Quotation submitted for approval successfully.",
@@ -852,6 +913,12 @@ async function approveQuotation(req, res) {
       recordId: quotationId,
       details: "Approved quotation.",
     });
+
+    await notifyQuotationCreator(quotationId, (quotation) => ({
+      title: "Quotation Approved",
+      message: `Your quotation ${quotation.quotation_number} has been approved.`,
+      type: "success",
+    }));
 
     return res.status(200).json({
       success: true,
@@ -941,6 +1008,12 @@ async function rejectQuotation(req, res) {
       recordId: quotationId,
       details: `Rejected quotation. Reason: ${rejectionReason}`,
     });
+
+    await notifyQuotationCreator(quotationId, (quotation) => ({
+      title: "Quotation Rejected",
+      message: `Your quotation ${quotation.quotation_number} was rejected. Reason: ${rejectionReason}`,
+      type: "error",
+    }));
 
     return res.status(200).json({
       success: true,

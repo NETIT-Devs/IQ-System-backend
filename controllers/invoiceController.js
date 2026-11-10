@@ -2,6 +2,15 @@ const invoiceModel = require("../models/invoiceModel");
 const { getCompanySettings } = require("../models/companySettingsModel");
 const { createEmailTransporter } = require("../config/email");
 const { createInvoicePdf } = require("../utils/invoicePdf");
+const { createNotificationsForRole } = require("../models/notificationModel");
+
+async function notifySuperAdmins(notification) {
+  try {
+    await createNotificationsForRole("Super Admin", notification);
+  } catch (error) {
+    console.error("Create invoice notification error:", error);
+  }
+}
 
 // Super Admins can access all records; Admins are limited to their own.
 function getOwnerId(req) {
@@ -395,6 +404,16 @@ async function addInvoice(req, res) {
       getOwnerId(req),
       { returnDetails: true }
     );
+
+    if (req.user.role === "Admin") {
+      await notifySuperAdmins({
+        title: "New Invoice Created",
+        message: `Invoice ${invoiceNumber} is ready to review.`,
+        type: "info",
+        referenceType: "invoice",
+        referenceId: invoiceId,
+      });
+    }
 
     return res.status(201).json({
       success: true,
