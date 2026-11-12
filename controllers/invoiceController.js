@@ -548,6 +548,36 @@ async function rejectInvoice(req, res) {
   }
 }
 
+// List convertible quotations for a selected customer.
+async function getInvoiceEligibleQuotations(req, res) {
+  const customerId = Number(req.query.customer_id);
+  if (!Number.isInteger(customerId) || customerId <= 0) {
+    return res.status(400).json({
+      success: false,
+      message: "A valid customer_id is required.",
+    });
+  }
+
+  try {
+    const quotations = await invoiceModel.getInvoiceEligibleQuotations(
+      customerId,
+      getOwnerId(req)
+    );
+
+    return res.status(200).json({
+      success: true,
+      count: quotations.length,
+      quotations,
+    });
+  } catch (error) {
+    console.error("Get invoice-eligible quotations error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve quotations for this customer.",
+    });
+  }
+}
+
 // Return one invoice after applying the current user's ownership scope.
 async function getInvoice(req, res) {
   const invoiceId = Number(req.params.id);
@@ -1008,6 +1038,7 @@ async function recordPayment(req, res) {
 module.exports = {
   getInvoices,
   getPendingInvoiceApprovals,
+  getInvoiceEligibleQuotations,
   getInvoice,
   addInvoice,
   approveInvoice,

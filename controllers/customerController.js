@@ -1,6 +1,7 @@
 
 const {
   getAllCustomers,
+  searchCustomers,
   getCustomerOverview,
   createCustomer,
   getMostQuotedCustomers,
@@ -40,6 +41,40 @@ async function getCustomers(req, res) {
     return res.status(500).json({
       success: false,
       message: "Failed to retrieve customers.",
+    });
+  }
+}
+
+async function getCustomerSuggestions(req, res) {
+  const search = String(req.query.search || "").trim();
+
+  if (search.length > 100) {
+    return res.status(400).json({
+      success: false,
+      message: "Search must be 100 characters or fewer.",
+    });
+  }
+
+  if (!search) {
+    return res.status(200).json({
+      success: true,
+      count: 0,
+      customers: [],
+    });
+  }
+
+  try {
+    const customers = await searchCustomers(search);
+    return res.status(200).json({
+      success: true,
+      count: customers.length,
+      customers,
+    });
+  } catch (error) {
+    console.error("Get customer suggestions error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve customer suggestions.",
     });
   }
 }
@@ -155,6 +190,7 @@ async function getMostQuotedCustomersController(req, res) {
 
 module.exports = {
   getCustomers,
+  getCustomerSuggestions,
   addCustomer,
   getMostQuotedCustomersController,
 };

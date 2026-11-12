@@ -28,15 +28,18 @@ async function createUser(fullName, email, passwordHash, role) {
 }
 
 async function getAllUsers(requestedPeriod) {
-  const period = normalizePeriod(requestedPeriod);
-  if (!period) {
+  const period = requestedPeriod ? normalizePeriod(requestedPeriod) : null;
+  if (requestedPeriod && !period) {
     throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
   }
 
+  const periodCondition = period
+    ? `WHERE ${getPeriodCondition("created_at", period)}`
+    : "";
   const [rows] = await db.execute(
     `SELECT user_id, full_name, email, role, is_active, created_at
      FROM users
-     WHERE ${getPeriodCondition("created_at", period)}
+     ${periodCondition}
      ORDER BY user_id DESC`
   );
 

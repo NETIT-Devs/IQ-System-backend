@@ -3,6 +3,7 @@ const express = require("express");
 
 const {
   getCustomers,
+  getCustomerSuggestions,
   addCustomer,
   getMostQuotedCustomersController,
 } = require("../controllers/customerController");
@@ -25,6 +26,9 @@ router.get(
   authMiddleware,
   getMostQuotedCustomersController
 );
+
+// Search customers for invoice and quotation selectors.
+router.get("/suggestions", authMiddleware, getCustomerSuggestions);
 
 // Get all customers
 router.get("/", authMiddleware, getCustomers);

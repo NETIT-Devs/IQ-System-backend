@@ -286,6 +286,61 @@ async function getPendingInvoiceApprovals(requestedPeriod) {
   return rows;
 }
 
+// Return quotations that can be converted into invoices for one customer.
+async function getInvoiceEligibleQuotations(customerId, createdBy) {
+  const ownerCondition =
+    createdBy === undefined || createdBy === null
+      ? ""
+      : "AND q.created_by = ?";
+  const params =
+    createdBy === undefined || createdBy === null
+      ? [customerId]
+      : [customerId, createdBy];
+
+  const [rows] = await db.execute(
+    `SELECT
+       q.quotation_id,
+       q.quotation_number,
+       q.customer_id,
+       q.quotation_date,
+       q.currency,
+       q.total_amount,
+       q.status,
+       q.approval_status,
+       (
+         SELECT COALESCE(SUM(p.amount), 0)
+         FROM payments p
+         WHERE p.quotation_id = q.quotation_id
+           AND p.invoice_id IS NULL
+           AND p.payment_status = 'Verified'
+       ) AS verified_payment_amount
+     FROM quotations q
+     WHERE q.customer_id = ?
+       ${ownerCondition}
+       AND EXISTS (
+         SELECT 1
+         FROM quotation_items qi
+         WHERE qi.quotation_id = q.quotation_id
+       )
+       AND EXISTS (
+         SELECT 1
+         FROM payments p
+         WHERE p.quotation_id = q.quotation_id
+           AND p.invoice_id IS NULL
+           AND p.payment_status = 'Verified'
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM invoices i
+         WHERE i.quotation_id = q.quotation_id
+       )
+     ORDER BY q.quotation_id DESC`,
+    params
+  );
+
+  return rows;
+}
+
 // Retrieve one invoice and its line items, optionally checking its owner.
 async function getInvoiceById(invoiceId, createdBy) {
   const ownerCondition =
@@ -911,6 +966,7 @@ async function recordInvoicePayment(
 module.exports = {
   getAllInvoices,
   getPendingInvoiceApprovals,
+  getInvoiceEligibleQuotations,
   getInvoiceById,
   reviewInvoiceApproval,
   createInvoice,

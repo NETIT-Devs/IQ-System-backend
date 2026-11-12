@@ -4,6 +4,7 @@ const express = require("express");
 const {
   getInvoices,
   getPendingInvoiceApprovals,
+  getInvoiceEligibleQuotations,
   getInvoice,
   addInvoice,
   approveInvoice,
@@ -29,6 +30,11 @@ router.get(
   authMiddleware,
   superAdminMiddleware,
   getPendingInvoiceApprovals
+);
+router.get(
+  "/eligible-quotations",
+  authMiddleware,
+  getInvoiceEligibleQuotations
 );
 router.post(
   "/:id/approve",

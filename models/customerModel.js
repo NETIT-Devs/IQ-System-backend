@@ -48,6 +48,36 @@ async function getAllCustomers({ search = "", period: requestedPeriod } = {}) {
   return rows;
 }
 
+async function searchCustomers(search, limit = 10) {
+  const searchTerm = `%${search}%`;
+  const prefixTerm = `${search}%`;
+  const [rows] = await db.execute(
+    `SELECT
+       customer_id,
+       customer_name,
+       company_name,
+       email,
+       phone,
+       address,
+       city,
+       country
+     FROM customers
+     WHERE customer_name LIKE ?
+        OR company_name LIKE ?
+     ORDER BY
+       CASE
+         WHEN LOWER(customer_name) = LOWER(?) THEN 0
+         WHEN LOWER(customer_name) LIKE LOWER(?) THEN 1
+         ELSE 2
+       END,
+       customer_name ASC
+     LIMIT ?`,
+    [searchTerm, searchTerm, search, prefixTerm, limit]
+  );
+
+  return rows;
+}
+
 // --------------------------------------------------
 // Create or reuse a customer
 // --------------------------------------------------
@@ -259,6 +289,7 @@ async function getMostQuotedCustomers(requestedPeriod = "1w") {
 
 module.exports = {
   getAllCustomers,
+  searchCustomers,
   createCustomer,
   getCustomerOverview,
   getMostQuotedCustomers,
