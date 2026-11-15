@@ -287,16 +287,7 @@ async function getPendingInvoiceApprovals(requestedPeriod) {
 }
 
 // Return quotations that can be converted into invoices for one customer.
-async function getInvoiceEligibleQuotations(customerId, createdBy) {
-  const ownerCondition =
-    createdBy === undefined || createdBy === null
-      ? ""
-      : "AND q.created_by = ?";
-  const params =
-    createdBy === undefined || createdBy === null
-      ? [customerId]
-      : [customerId, createdBy];
-
+async function getInvoiceEligibleQuotations(customerId) {
   const [rows] = await db.execute(
     `SELECT
        q.quotation_id,
@@ -316,18 +307,11 @@ async function getInvoiceEligibleQuotations(customerId, createdBy) {
        ) AS verified_payment_amount
      FROM quotations q
      WHERE q.customer_id = ?
-       ${ownerCondition}
+       AND q.approval_status = 'Approved'
        AND EXISTS (
          SELECT 1
          FROM quotation_items qi
          WHERE qi.quotation_id = q.quotation_id
-       )
-       AND EXISTS (
-         SELECT 1
-         FROM payments p
-         WHERE p.quotation_id = q.quotation_id
-           AND p.invoice_id IS NULL
-           AND p.payment_status = 'Verified'
        )
        AND NOT EXISTS (
          SELECT 1
@@ -335,7 +319,7 @@ async function getInvoiceEligibleQuotations(customerId, createdBy) {
          WHERE i.quotation_id = q.quotation_id
        )
      ORDER BY q.quotation_id DESC`,
-    params
+    [customerId]
   );
 
   return rows;
@@ -437,15 +421,7 @@ async function reviewInvoiceApproval(
 }
 
 // Load an accessible quotation and its items for invoice conversion.
-async function getQuotationInvoiceData(connection, quotationId, ownerId) {
-  const ownerCondition =
-    ownerId === undefined || ownerId === null
-      ? ""
-      : "AND created_by = ?";
-  const params =
-    ownerId === undefined || ownerId === null
-      ? [quotationId]
-      : [quotationId, ownerId];
+async function getQuotationInvoiceData(connection, quotationId) {
   const [quotations] = await connection.execute(
     `SELECT
        quotation_id,
@@ -456,12 +432,13 @@ async function getQuotationInvoiceData(connection, quotationId, ownerId) {
        tax_amount,
        total_amount,
        notes,
-       terms_and_conditions
+       terms_and_conditions,
+       approval_status
      FROM quotations
-     WHERE quotation_id = ? ${ownerCondition}
+     WHERE quotation_id = ?
      LIMIT 1
      FOR UPDATE`,
-    params
+    [quotationId]
   );
 
   if (quotations.length === 0) {
@@ -471,6 +448,14 @@ async function getQuotationInvoiceData(connection, quotationId, ownerId) {
   }
 
   const quotation = quotations[0];
+  if (quotation.approval_status !== "Approved") {
+    const error = new Error(
+      "Only approved quotations can be converted to invoices."
+    );
+    error.code = "QUOTATION_NOT_APPROVED";
+    throw error;
+  }
+
   const [items] = await connection.execute(
     `SELECT
        item_name,
@@ -497,7 +482,6 @@ async function getQuotationInvoiceData(connection, quotationId, ownerId) {
 async function createInvoice(
   invoice,
   items = [],
-  quotationOwnerId,
   { returnDetails = false, approvalStatus = "Not Required" } = {}
 ) {
   const connection = await db.getConnection();
@@ -516,8 +500,7 @@ async function createInvoice(
       const { quotation, items: quotationItems } =
         await getQuotationInvoiceData(
           connection,
-          invoice.quotation_id,
-          quotationOwnerId
+          invoice.quotation_id
         );
 
       const [existingInvoices] = await connection.execute(
@@ -558,13 +541,6 @@ async function createInvoice(
       verifiedPayments = quotationPayments.filter(
         (payment) => payment.payment_status === "Verified"
       );
-      if (verifiedPayments.length === 0) {
-        const error = new Error(
-          "At least one verified payment is required before creating an invoice from a quotation."
-        );
-        error.code = "VERIFIED_PAYMENT_REQUIRED";
-        throw error;
-      }
 
       const verifiedAmount = roundMoney(
         verifiedPayments.reduce(
@@ -582,7 +558,10 @@ async function createInvoice(
         discount_type: "fixed",
         discount_value: Number(quotation.discount_amount || 0),
         notes: quotation.notes,
-        terms_and_conditions: quotation.terms_and_conditions,
+        terms_and_conditions:
+          invoice.terms_and_conditions === undefined
+            ? quotation.terms_and_conditions
+            : invoice.terms_and_conditions,
       };
 
       invoiceItems = quotationItems;

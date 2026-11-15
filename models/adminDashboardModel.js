@@ -18,7 +18,8 @@ const AdminDashboardModel = {
       SELECT COUNT(*) AS totalCustomers
       FROM customers
       WHERE ${getPeriodCondition("created_at", period)}
-    `);
+      ${createdBy == null ? "" : "AND created_by = ?"}
+    `, createdBy == null ? [] : [createdBy]);
 
     const [quotationCount] = await db.query(`
       SELECT COUNT(*) AS totalQuotations
@@ -58,12 +59,35 @@ const AdminDashboardModel = {
       INNER JOIN invoices i
         ON i.invoice_id = p.invoice_id
       WHERE ${getPeriodCondition("p.payment_date", period)}
+      AND p.payment_status = 'Verified'
       ${createdBy == null ? "" : "AND i.created_by = ?"}
     `, createdBy == null ? [] : [createdBy]);
+
+    const [monthlyRows] = await db.query(
+      `SELECT
+         DATE_FORMAT(i.invoice_date, '%Y-%m') AS month_key,
+         DATE_FORMAT(i.invoice_date, '%b') AS label,
+         COALESCE(SUM(i.amount_paid), 0) AS collected,
+         COALESCE(SUM(GREATEST(i.balance_due, 0)), 0) AS outstanding
+       FROM invoices i
+       WHERE ${getPeriodCondition("i.invoice_date", period)}
+         AND i.status NOT IN ('Cancelled', 'Rejected')
+         ${createdBy == null ? "" : "AND i.created_by = ?"}
+       GROUP BY DATE_FORMAT(i.invoice_date, '%Y-%m'), DATE_FORMAT(i.invoice_date, '%b')
+       ORDER BY month_key DESC
+       LIMIT 6`,
+      createdBy == null ? [] : [createdBy]
+    );
 
     return {
       income: Number(incomeResult[0].totalIncome),
       expenses: 0,
+      chartData: monthlyRows.reverse().map((row) => ({
+        key: row.month_key,
+        label: row.label,
+        collected: Number(row.collected),
+        outstanding: Number(row.outstanding),
+      })),
     };
   },
 

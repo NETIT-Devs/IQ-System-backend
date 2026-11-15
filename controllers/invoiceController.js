@@ -69,6 +69,16 @@ async function getInvoicePdf(req, res) {
     const invoice = await findInvoice(req, res);
     if (!invoice) return;
 
+    if (
+      req.user.role === "Admin" &&
+      invoice.approval_status !== "Approved"
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "This invoice must be approved before it can be downloaded.",
+      });
+    }
+
     const company = await getCompanySettings();
     const pdf = await createInvoicePdf(invoice, company || {});
     const filename = `${String(invoice.invoice_number || "invoice").replace(
@@ -96,6 +106,16 @@ async function sendInvoiceEmail(req, res) {
   try {
     const invoice = await findInvoice(req, res);
     if (!invoice) return;
+
+    if (
+      req.user.role === "Admin" &&
+      invoice.approval_status !== "Approved"
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "This invoice must be approved before it can be emailed.",
+      });
+    }
 
     if (!invoice.customer_email) {
       return res.status(400).json({
@@ -264,6 +284,16 @@ function validateInvoice(invoice, items) {
         .slice(0, 10) !== invoice.due_date)
   ) {
     return "Invalid due_date. Use YYYY-MM-DD format.";
+  }
+
+  for (const field of ["notes", "terms_and_conditions"]) {
+    if (
+      invoice[field] !== undefined &&
+      invoice[field] !== null &&
+      typeof invoice[field] !== "string"
+    ) {
+      return `${field} must be a string.`;
+    }
   }
 
   if (
@@ -560,8 +590,7 @@ async function getInvoiceEligibleQuotations(req, res) {
 
   try {
     const quotations = await invoiceModel.getInvoiceEligibleQuotations(
-      customerId,
-      getOwnerId(req)
+      customerId
     );
 
     return res.status(200).json({
@@ -635,7 +664,6 @@ async function addInvoice(req, res) {
         created_by: req.user.user_id,
       },
       Array.isArray(items) ? items : [],
-      getOwnerId(req),
       {
         returnDetails: true,
         approvalStatus: req.user.role === "Admin" ? "Pending" : "Not Required",
@@ -684,6 +712,13 @@ async function addInvoice(req, res) {
       });
     }
 
+    if (error.code === "QUOTATION_NOT_APPROVED") {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
     if (error.code === "INVALID_INVOICE_DISCOUNT") {
       return res.status(400).json({
         success: false,
@@ -716,7 +751,6 @@ async function addInvoice(req, res) {
     }
 
     if (
-      error.code === "VERIFIED_PAYMENT_REQUIRED" ||
       error.code === "QUOTATION_PAYMENTS_CHANGED" ||
       error.code === "QUOTATION_ALREADY_INVOICED"
     ) {

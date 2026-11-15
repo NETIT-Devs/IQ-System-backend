@@ -4,6 +4,7 @@ const {
   getQuotationItemOptions,
   getQuotations,
   getQuotation,
+  getQuotationPdf,
   addQuotation,
   updateQuotation,
   updateQuotationStatus,
@@ -57,6 +58,9 @@ router.patch("/:id/status", updateQuotationStatus);
 
 // Update customer quotation status (Sent, Accepted, Rejected) - New Route
 router.patch("/:id/customer-status", updateCustomerQuotationStatus);
+
+// Download a quotation after Super Admin approval.
+router.get("/:id/pdf", getQuotationPdf);
 
 // Get one quotation by ID
 router.get("/:id", getQuotation);

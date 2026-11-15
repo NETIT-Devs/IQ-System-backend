@@ -53,6 +53,21 @@ async function getFinancialOverview(requestedPeriod) {
     SELECT COALESCE(SUM(amount), 0) AS total_income
     FROM payments
     WHERE ${getPeriodCondition("payment_date", period)}
+      AND payment_status = 'Verified'
+  `);
+
+  const [monthlyRows] = await db.query(`
+    SELECT
+      DATE_FORMAT(invoice_date, '%Y-%m') AS month_key,
+      DATE_FORMAT(invoice_date, '%b') AS label,
+      COALESCE(SUM(amount_paid), 0) AS collected,
+      COALESCE(SUM(GREATEST(balance_due, 0)), 0) AS outstanding
+    FROM invoices
+    WHERE ${getPeriodCondition("invoice_date", period)}
+      AND status NOT IN ('Cancelled', 'Rejected')
+    GROUP BY DATE_FORMAT(invoice_date, '%Y-%m'), DATE_FORMAT(invoice_date, '%b')
+    ORDER BY month_key DESC
+    LIMIT 6
   `);
 
   return {
@@ -60,6 +75,12 @@ async function getFinancialOverview(requestedPeriod) {
     expenses: 0,
     expenseTrackingConfigured: false,
     message: "Expense tracking is not configured yet.",
+    chartData: monthlyRows.reverse().map((row) => ({
+      key: row.month_key,
+      label: row.label,
+      collected: Number(row.collected),
+      outstanding: Number(row.outstanding),
+    })),
   };
 }
 

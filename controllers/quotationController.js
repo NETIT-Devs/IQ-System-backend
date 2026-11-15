@@ -9,6 +9,8 @@ const {
 } = require("../models/quotationModel");
 
 const { getActiveServices } = require("../models/serviceCatalogModel");
+const { getCompanySettings } = require("../models/companySettingsModel");
+const { createQuotationPdf } = require("../utils/quotationPdf");
 const { createAuditLog } = require("../models/auditLogModel");
 const { normalizePeriod } = require("../utils/periodFilter");
 const {
@@ -396,6 +398,17 @@ async function getQuotationItemOptions(req, res) {
 
 async function getQuotations(req, res) {
   try {
+    const forInvoice = String(req.query.for_invoice || "").toLowerCase() === "true";
+    if (
+      forInvoice &&
+      !["Admin", "Super Admin"].includes(req.user?.role)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Only administrators can list quotations for invoices.",
+      });
+    }
+
     const period = normalizePeriod(req.query.period);
     if (!period) {
       return res.status(400).json({
@@ -420,6 +433,7 @@ async function getQuotations(req, res) {
       from_date,
       to_date,
       created_by: getQuotationOwnerId(req),
+      for_invoice: forInvoice,
     });
 
     return res.status(200).json({
@@ -475,6 +489,57 @@ async function getQuotation(req, res) {
     return res.status(500).json({
       success: false,
       message: "Failed to retrieve quotation.",
+    });
+  }
+}
+
+async function getQuotationPdf(req, res) {
+  if (!["Admin", "Super Admin"].includes(req.user?.role)) {
+    return res.status(403).json({
+      success: false,
+      message: "Only administrators can download quotations.",
+    });
+  }
+
+  const quotationId = Number(req.params.id);
+  if (!Number.isInteger(quotationId) || quotationId <= 0) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid quotation ID.",
+    });
+  }
+
+  try {
+    const quotation = await getQuotationById(quotationId);
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: "Quotation not found.",
+      });
+    }
+
+    if (quotation.approval_status !== "Approved") {
+      return res.status(403).json({
+        success: false,
+        message: "This quotation must be approved before it can be downloaded.",
+      });
+    }
+
+    const company = await getCompanySettings();
+    const pdf = await createQuotationPdf(quotation, company || {});
+    const filename = `${String(quotation.quotation_number || "quotation").replace(
+      /[^A-Za-z0-9._-]/g,
+      "_"
+    )}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    return res.status(200).send(pdf);
+  } catch (error) {
+    console.error("Generate quotation PDF error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to generate quotation PDF.",
     });
   }
 }
@@ -1213,6 +1278,7 @@ module.exports = {
   getQuotationItemOptions,
   getQuotations,
   getQuotation,
+  getQuotationPdf,
   addQuotation,
   updateQuotation,
   deleteQuotation,

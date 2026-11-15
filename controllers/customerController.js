@@ -9,6 +9,10 @@ const {
 const { createAuditLog } = require("../models/auditLogModel");
 const { normalizePeriod } = require("../utils/periodFilter");
 
+function getCustomerOwnerId(req) {
+  return req.user?.role === "Super Admin" ? undefined : req.user?.user_id;
+}
+
 // --------------------------------------------------
 // Get all customers
 // --------------------------------------------------
@@ -25,8 +29,12 @@ async function getCustomers(req, res) {
     }
 
     const [customers, summary] = await Promise.all([
-      getAllCustomers({ search, period }),
-      getCustomerOverview(period),
+      getAllCustomers({
+        search,
+        period,
+        createdBy: getCustomerOwnerId(req),
+      }),
+      getCustomerOverview(period, getCustomerOwnerId(req)),
     ]);
 
     return res.status(200).json({
@@ -171,7 +179,10 @@ async function getMostQuotedCustomersController(req, res) {
       });
     }
 
-    const customers = await getMostQuotedCustomers(period);
+    const customers = await getMostQuotedCustomers(
+      period,
+      getCustomerOwnerId(req)
+    );
 
     return res.status(200).json({
       success: true,

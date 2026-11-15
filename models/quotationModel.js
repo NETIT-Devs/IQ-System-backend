@@ -32,22 +32,23 @@ function buildQuotationFilters(filters = {}) {
     from_date,
     to_date,
     created_by,
+    for_invoice: forInvoice = false,
   } = filters;
   const period = normalizePeriod(requestedPeriod);
   if (!period) {
     throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
   }
 
-  if (created_by !== undefined && created_by !== null) {
+  if (!forInvoice && created_by !== undefined && created_by !== null) {
     conditions.push("q.created_by = ?");
     params.push(created_by);
   }
 
-  if (!from_date && !to_date) {
+  if (!forInvoice && !from_date && !to_date) {
     conditions.push(getPeriodCondition("q.quotation_date", period));
   }
 
-  if (from_date || to_date) {
+  if (!forInvoice && (from_date || to_date)) {
     if (
       (from_date && !/^\d{4}-\d{2}-\d{2}$/.test(from_date)) ||
       (to_date && !/^\d{4}-\d{2}-\d{2}$/.test(to_date))
@@ -68,6 +69,17 @@ function buildQuotationFilters(filters = {}) {
       conditions.push("q.quotation_date <= ?");
       params.push(to_date);
     }
+  }
+
+  if (forInvoice) {
+    conditions.push("q.approval_status = 'Approved'");
+    conditions.push(
+      `NOT EXISTS (
+        SELECT 1
+        FROM invoices i
+        WHERE i.quotation_id = q.quotation_id
+      )`
+    );
   }
 
   if (status) {
@@ -115,6 +127,10 @@ async function getAllQuotations(filters = {}) {
       q.quotation_number,
       q.customer_id,
       c.customer_name,
+      c.company_name AS customer_company,
+      c.email AS customer_email,
+      c.phone AS customer_phone,
+      c.address AS customer_address,
       q.created_by,
       q.quotation_date,
       q.project_start_date,
@@ -209,6 +225,10 @@ async function getQuotationById(quotationId, createdBy) {
       q.quotation_number,
       q.customer_id,
       c.customer_name,
+      c.company_name AS customer_company,
+      c.email AS customer_email,
+      c.phone AS customer_phone,
+      c.address AS customer_address,
       q.created_by,
       q.quotation_date,
       q.project_start_date,
