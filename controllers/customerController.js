@@ -129,7 +129,10 @@ async function addCustomer(req, res) {
         created_by: req.user?.user_id || null,
       },
       undefined,
-      { rejectExisting: true }
+      {
+        rejectExisting: true,
+        claimSuperAdminCustomer: req.user?.role === "Admin",
+      }
     );
 
     await createAuditLog({

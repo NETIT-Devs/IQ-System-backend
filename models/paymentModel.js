@@ -388,7 +388,13 @@ async function verifyPayment(paymentId, verifiedBy) {
     }
 
     const [payments] = await connection.execute(
-      `SELECT payment_id, invoice_id, quotation_id, amount, payment_status
+      `SELECT
+         payment_id,
+         invoice_id,
+         quotation_id,
+         received_by,
+         amount,
+         payment_status
        FROM payments
        WHERE payment_id = ?
        FOR UPDATE`,
@@ -492,6 +498,8 @@ async function verifyPayment(paymentId, verifiedBy) {
     await connection.commit();
     return {
       payment_id: paymentId,
+      received_by: payment.received_by,
+      amount: Number(payment.amount),
       payment_status: "Verified",
       invoice_id: payment.invoice_id,
     };
@@ -504,6 +512,33 @@ async function verifyPayment(paymentId, verifiedBy) {
 }
 
 async function rejectPayment(paymentId, rejectedBy, rejectionReason) {
+  const [pendingPayments] = await db.execute(
+    `SELECT payment_id, received_by, amount, invoice_id, quotation_id
+     FROM payments
+     WHERE payment_id = ?
+       AND payment_status = 'Pending'
+     LIMIT 1`,
+    [paymentId]
+  );
+
+  if (pendingPayments.length === 0) {
+    const [existingPayments] = await db.execute(
+      `SELECT payment_id
+       FROM payments
+       WHERE payment_id = ?
+       LIMIT 1`,
+      [paymentId]
+    );
+
+    if (existingPayments.length === 0) {
+      return null;
+    }
+
+    const error = new Error("Only pending payments can be rejected.");
+    error.code = "PAYMENT_NOT_PENDING";
+    throw error;
+  }
+
   const [result] = await db.execute(
     `UPDATE payments
      SET payment_status = 'Rejected',
@@ -516,10 +551,10 @@ async function rejectPayment(paymentId, rejectedBy, rejectionReason) {
   );
 
   if (result.affectedRows > 0) {
-    return true;
+    return pendingPayments[0];
   }
 
-  const [rows] = await db.execute(
+  const [existingPayments] = await db.execute(
     `SELECT payment_id
      FROM payments
      WHERE payment_id = ?
@@ -527,7 +562,7 @@ async function rejectPayment(paymentId, rejectedBy, rejectionReason) {
     [paymentId]
   );
 
-  if (rows.length === 0) {
+  if (existingPayments.length === 0) {
     return null;
   }
 

@@ -1,7 +1,34 @@
 const fs = require("fs/promises");
 const paymentModel = require("../models/paymentModel");
 const { getCompanySettings } = require("../models/companySettingsModel");
+const {
+  createNotification,
+  createNotificationsForRole,
+} = require("../models/notificationModel");
 const { normalizePeriod } = require("../utils/periodFilter");
+
+async function notifyPaymentReviewers(notification) {
+  try {
+    await createNotificationsForRole("Super Admin", notification);
+  } catch (error) {
+    console.error("Create payment notification error:", error);
+  }
+}
+
+async function notifyPaymentSubmitter(payment, notification) {
+  if (!payment?.received_by) return;
+
+  try {
+    await createNotification({
+      ...notification,
+      userId: payment.received_by,
+      referenceType: "payment",
+      referenceId: payment.payment_id,
+    });
+  } catch (error) {
+    console.error("Notify payment submitter error:", error);
+  }
+}
 
 const paymentMethods = new Set([
   "Bank Transfer",
@@ -199,6 +226,16 @@ async function addPayment(req, res) {
       paymentSlip: `/uploads/payment-slips/${file.filename}`,
     });
 
+    if (req.user.role === "Admin") {
+      await notifyPaymentReviewers({
+        title: "Payment Pending Verification",
+        message: `Payment ${paymentId} is waiting for verification.`,
+        type: "warning",
+        referenceType: "payment",
+        referenceId: paymentId,
+      });
+    }
+
     return res.status(201).json({
       success: true,
       message: "Payment submitted for verification.",
@@ -251,6 +288,12 @@ async function verifyPayment(req, res) {
         message: "Payment not found.",
       });
     }
+
+    await notifyPaymentSubmitter(payment, {
+      title: "Payment Verified",
+      message: `Your payment ${payment.payment_id} has been verified.`,
+      type: "success",
+    });
 
     return res.status(200).json({
       success: true,
@@ -305,6 +348,13 @@ async function rejectPayment(req, res) {
         message: "Payment not found.",
       });
     }
+
+    await notifyPaymentSubmitter(rejected, {
+      title: "Payment Rejected",
+      message: `Your payment ${rejected.payment_id} was rejected. Reason: ${rejectionReason}`,
+      type: "error",
+    });
+
     return res.status(200).json({
       success: true,
       message: "Payment rejected.",

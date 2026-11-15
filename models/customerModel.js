@@ -27,6 +27,23 @@ async function getAllCustomers({
   }
 
   conditions.push(getPeriodCondition("created_at", period));
+  if (createdBy != null) {
+    conditions.push(
+      `(customers.created_by = ?
+        OR EXISTS (
+          SELECT 1
+          FROM quotations q
+          WHERE q.customer_id = customers.customer_id
+            AND q.created_by = ?
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM invoices i
+          WHERE i.customer_id = customers.customer_id
+            AND i.created_by = ?
+        ))`
+    );
+  }
 
   const [rows] = await db.execute(
     `SELECT
@@ -58,7 +75,16 @@ async function getAllCustomers({
      FROM customers
      ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
      ORDER BY customer_id DESC`,
-    createdBy == null ? params : [createdBy, createdBy, ...params]
+    createdBy == null
+      ? params
+      : [
+          createdBy,
+          createdBy,
+          ...params,
+          createdBy,
+          createdBy,
+          createdBy,
+        ]
   );
 
   return rows;
@@ -101,7 +127,11 @@ async function searchCustomers(search, limit = 10) {
 async function createCustomer(
   customer,
   connection = db,
-  { matchByNameOnly = false, rejectExisting = false } = {}
+  {
+    matchByNameOnly = false,
+    rejectExisting = false,
+    claimSuperAdminCustomer = false,
+  } = {}
 ) {
   const {
     customer_name,
@@ -124,48 +154,70 @@ async function createCustomer(
     throw new Error("Customer name is required.");
   }
 
-  // Reject duplicate manual customer submissions while keeping reuse behavior for invoices and quotations.
+  // Reuse a Super Admin customer row when an Admin manually adds that same customer.
   if (rejectExisting) {
-    const identityConditions = ["LOWER(TRIM(c.customer_name)) = LOWER(?)"];
-    const identityParams = [name];
-
-    if (normalizedEmail) {
-      identityConditions.push("LOWER(TRIM(c.email)) = ?");
-      identityParams.push(normalizedEmail);
-    }
-
-    if (normalizedPhone) {
-      identityConditions.push("TRIM(c.phone) = ?");
-      identityParams.push(normalizedPhone);
-    }
+    const identityCondition = normalizedEmail
+      ? "(LOWER(TRIM(COALESCE(c.email, ''))) = ? OR " +
+        "(TRIM(COALESCE(c.email, '')) = '' AND LOWER(TRIM(c.customer_name)) = LOWER(?)))"
+      : "LOWER(TRIM(c.customer_name)) = LOWER(?)";
+    const identityParams = normalizedEmail
+      ? [normalizedEmail, name]
+      : [name];
 
     const [existingCustomers] = await connection.execute(
-      `SELECT c.customer_id, u.role AS created_by_role
+      `SELECT c.customer_id, c.created_by, u.role AS created_by_role
        FROM customers c
        LEFT JOIN users u
          ON u.user_id = c.created_by
-       WHERE ${identityConditions.join(" OR ")}
-       ORDER BY (u.role = 'Super Admin') DESC
+       WHERE ${identityCondition}
+       ORDER BY
+         ${normalizedEmail ? "(LOWER(TRIM(COALESCE(c.email, ''))) = ?) DESC," : ""}
+         (u.role = 'Super Admin') DESC,
+         c.customer_id DESC
        LIMIT 1`,
-      identityParams
+      normalizedEmail ? [...identityParams, normalizedEmail] : identityParams
     );
 
     if (existingCustomers.length > 0) {
+      const existingCustomer = existingCustomers[0];
+      if (
+        claimSuperAdminCustomer &&
+        existingCustomer.created_by_role === "Super Admin"
+      ) {
+        const [claimResult] = await connection.execute(
+          `UPDATE customers
+           SET created_by = ?
+           WHERE customer_id = ? AND created_by = ?`,
+          [
+            created_by,
+            existingCustomer.customer_id,
+            existingCustomer.created_by,
+          ]
+        );
+
+        if (claimResult.affectedRows === 1) {
+          return existingCustomer.customer_id;
+        }
+      }
+
       const error = new Error("Customer already exists.");
       error.code = "CUSTOMER_ALREADY_EXISTS";
-      error.createdByRole = existingCustomers[0].created_by_role;
+      error.createdByRole = existingCustomer.created_by_role;
       throw error;
     }
   }
 
   // Prefer an existing customer with the same normalized name.
-  const [existingByName] = await connection.execute(
-    `SELECT customer_id
-     FROM customers
-     WHERE LOWER(TRIM(customer_name)) = LOWER(?)
-     LIMIT 1`,
-    [name]
-  );
+  let existingByName = [];
+  if (!(rejectExisting && normalizedEmail)) {
+    [existingByName] = await connection.execute(
+      `SELECT customer_id
+       FROM customers
+       WHERE LOWER(TRIM(customer_name)) = LOWER(?)
+       LIMIT 1`,
+      [name]
+    );
+  }
 
   if (existingByName.length > 0) {
     return existingByName[0].customer_id;
@@ -239,25 +291,44 @@ async function getCustomerOverview(requestedPeriod = "1w", createdBy) {
   if (!period) {
     throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
   }
-  const customerPeriod = getPeriodCondition("created_at", period);
+  const customerPeriod = getPeriodCondition("c.created_at", period);
   const quotationPeriod = getPeriodCondition("quotation_date", period);
   const quotationOwnerCondition =
     createdBy == null ? "" : "AND created_by = ?";
-
+  const customerOwnerCondition =
+    createdBy == null
+      ? ""
+      : `AND (
+          c.created_by = ?
+          OR EXISTS (
+            SELECT 1
+            FROM quotations q
+            WHERE q.customer_id = c.customer_id
+              AND q.created_by = ?
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM invoices i
+            WHERE i.customer_id = c.customer_id
+              AND i.created_by = ?
+          )
+        )`;
   const [[customerSummary]] = await db.execute(
     `SELECT
        COUNT(*) AS total_customers,
-       COALESCE(SUM(DATE(created_at) = CURDATE()), 0) AS customers_added_today
-     FROM customers
-    WHERE ${customerPeriod}`
+       COALESCE(SUM(DATE(c.created_at) = CURDATE()), 0) AS customers_added_today
+     FROM customers c
+    WHERE ${customerPeriod}
+      ${customerOwnerCondition}`,
+    createdBy == null ? [] : [createdBy, createdBy, createdBy]
   );
 
   const [[quotationSummary]] = await db.execute(
     `SELECT COUNT(*) AS accepted_quotations
      FROM quotations
      WHERE customer_status IN ('Customer Accepted', 'Accepted')
-       AND ${quotationPeriod}
-       ${quotationOwnerCondition}`,
+     AND ${quotationPeriod}
+      ${quotationOwnerCondition}`,
     createdBy == null ? [] : [createdBy]
   );
 
@@ -279,7 +350,6 @@ async function getMostQuotedCustomers(requestedPeriod = "1w", createdBy) {
   }
   const quotationPeriod = getPeriodCondition("q.quotation_date", period);
   const ownerCondition = createdBy == null ? "" : "AND q.created_by = ?";
-
   const [rows] = await db.execute(
     `SELECT
        c.customer_id,
