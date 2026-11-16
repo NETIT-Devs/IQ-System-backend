@@ -19,7 +19,19 @@ router.patch(
   superAdminMiddleware,
   verifyPayment
 );
+router.post(
+  "/:id/approve",
+  authMiddleware,
+  superAdminMiddleware,
+  verifyPayment
+);
 router.patch(
+  "/:id/reject",
+  authMiddleware,
+  superAdminMiddleware,
+  rejectPayment
+);
+router.post(
   "/:id/reject",
   authMiddleware,
   superAdminMiddleware,

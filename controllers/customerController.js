@@ -115,6 +115,20 @@ async function addCustomer(req, res) {
       });
     }
 
+    if (typeof email !== "string" || !email.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer email is required.",
+      });
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid customer email is required.",
+      });
+    }
+
     const customerId = await createCustomer(
       {
         customer_name,

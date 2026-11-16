@@ -181,18 +181,32 @@ async function sendInvoiceEmail(req, res) {
 // Read customer details from the supported request payload formats.
 function getCustomerData(invoice) {
   if (invoice.customer && typeof invoice.customer === "object") {
-    return invoice.customer;
+    return {
+      ...invoice.customer,
+      email:
+        invoice.customer.email ||
+        invoice.customer.customer_email ||
+        invoice.email ||
+        invoice.customer_email,
+    };
   }
   if (
     invoice.customer_details &&
     typeof invoice.customer_details === "object"
   ) {
-    return invoice.customer_details;
+    return {
+      ...invoice.customer_details,
+      email:
+        invoice.customer_details.email ||
+        invoice.customer_details.customer_email ||
+        invoice.email ||
+        invoice.customer_email,
+    };
   }
   return {
     customer_name: invoice.customer_name,
     company_name: invoice.company_name,
-    email: invoice.email,
+    email: invoice.email || invoice.customer_email,
     phone: invoice.phone,
     address: invoice.address,
     city: invoice.city,
@@ -203,7 +217,7 @@ function getCustomerData(invoice) {
 }
 
 // Validate invoice fields, customer selection, dates, discounts, and line items.
-function validateInvoice(invoice, items) {
+function validateInvoice(invoice, items, { existingDueDate } = {}) {
   const quotationId = Number(invoice.quotation_id);
   const canUseQuotationItems =
     invoice.quotation_id !== undefined &&
@@ -272,6 +286,17 @@ function validateInvoice(invoice, items) {
     return "Invalid invoice_date. Use YYYY-MM-DD format.";
   }
 
+  const customerEmail = String(getCustomerData(invoice).email || "").trim();
+  if (!customerEmail && !invoice.customer_id && !canUseQuotationItems) {
+    return "Customer email is required.";
+  }
+  if (
+    customerEmail &&
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail)
+  ) {
+    return "A valid customer email is required.";
+  }
+
   if (
     invoice.due_date !== undefined &&
     invoice.due_date !== null &&
@@ -284,6 +309,24 @@ function validateInvoice(invoice, items) {
         .slice(0, 10) !== invoice.due_date)
   ) {
     return "Invalid due_date. Use YYYY-MM-DD format.";
+  }
+
+  if (invoice.due_date && invoice.due_date < invoice.invoice_date) {
+    return "Due date cannot be earlier than the invoice date.";
+  }
+
+  if (invoice.due_date) {
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(
+      now.getMonth() + 1
+    ).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const savedDueDate =
+      existingDueDate instanceof Date
+        ? existingDueDate.toISOString().slice(0, 10)
+        : String(existingDueDate || "").slice(0, 10);
+    if (invoice.due_date < today && invoice.due_date !== savedDueDate) {
+      return "Due date must be today or a future date.";
+    }
   }
 
   for (const field of ["notes", "terms_and_conditions"]) {
@@ -354,9 +397,25 @@ function validateInvoice(invoice, items) {
 
   if (
     invoice.status !== undefined &&
-    !["Draft", "Issued", "Overdue", "Cancelled"].includes(invoice.status)
+    invoice.status !== null &&
+    invoice.status !== ""
   ) {
-    return "Invalid invoice status.";
+    const statusKey = String(invoice.status).trim().toLowerCase();
+    const normalizedStatuses = {
+      draft: "Draft",
+      issued: "Issued",
+      unpaid: "Issued",
+      "pending approval": "Issued",
+      "partially paid": "Issued",
+      partially_paid: "Issued",
+      overdue: "Overdue",
+      cancelled: "Cancelled",
+      paid: "Paid",
+    };
+    if (!normalizedStatuses[statusKey]) {
+      return "Invalid invoice status.";
+    }
+    invoice.status = normalizedStatuses[statusKey];
   }
 
   if (canUseQuotationItems) {
@@ -581,16 +640,29 @@ async function rejectInvoice(req, res) {
 // List convertible quotations for a selected customer.
 async function getInvoiceEligibleQuotations(req, res) {
   const customerId = Number(req.query.customer_id);
+  const invoiceId =
+    req.query.invoice_id === undefined ? undefined : Number(req.query.invoice_id);
   if (!Number.isInteger(customerId) || customerId <= 0) {
     return res.status(400).json({
       success: false,
       message: "A valid customer_id is required.",
     });
   }
+  if (
+    invoiceId !== undefined &&
+    (!Number.isInteger(invoiceId) || invoiceId <= 0)
+  ) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid invoice_id.",
+    });
+  }
 
   try {
     const quotations = await invoiceModel.getInvoiceEligibleQuotations(
-      customerId
+      customerId,
+      invoiceId,
+      getOwnerId(req)
     );
 
     return res.status(200).json({
@@ -620,7 +692,8 @@ async function getInvoice(req, res) {
   try {
     const invoice = await invoiceModel.getInvoiceById(
       invoiceId,
-      getOwnerId(req)
+      getOwnerId(req),
+      { includePendingPaymentTotals: req.user?.role === "Super Admin" }
     );
 
     if (!invoice) {
@@ -698,10 +771,17 @@ async function addInvoice(req, res) {
   } catch (error) {
     console.error("Create invoice error:", error);
 
-    if (error.message === "Customer name is required.") {
+    if (
+      error.message === "Customer name is required." ||
+      error.message === "Customer email is required." ||
+      error.message === "Selected customer was not found."
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Select an existing customer or provide a customer name.",
+        message:
+          error.message === "Customer name is required."
+            ? "Select an existing customer or provide a customer name."
+            : error.message,
       });
     }
 
@@ -792,15 +872,28 @@ async function editInvoice(req, res) {
   }
 
   const invoice = req.body || {};
-  const validationError = validateInvoice(invoice, invoice.items);
-  if (validationError) {
-    return res.status(400).json({
-      success: false,
-      message: validationError,
-    });
-  }
-
   try {
+    const existingInvoice = await invoiceModel.getInvoiceById(
+      invoiceId,
+      getOwnerId(req)
+    );
+    if (!existingInvoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice not found.",
+      });
+    }
+
+    const validationError = validateInvoice(invoice, invoice.items, {
+      existingDueDate: existingInvoice.due_date,
+    });
+    if (validationError) {
+      return res.status(400).json({
+        success: false,
+        message: validationError,
+      });
+    }
+
     const updatedInvoice = await invoiceModel.updateInvoice(
       invoiceId,
       invoice,
@@ -831,10 +924,17 @@ async function editInvoice(req, res) {
   } catch (error) {
     console.error("Update invoice error:", error);
 
-    if (error.message === "Customer name is required.") {
+    if (
+      error.message === "Customer name is required." ||
+      error.message === "Customer email is required." ||
+      error.message === "Selected customer was not found."
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Select an existing customer or provide a customer name.",
+        message:
+          error.message === "Customer name is required."
+            ? "Select an existing customer or provide a customer name."
+            : error.message,
       });
     }
 
@@ -869,7 +969,7 @@ async function editInvoice(req, res) {
   }
 }
 
-// Delete a Draft invoice only.
+// Admins can delete their own Draft invoices; Super Admin can delete any invoice.
 async function removeInvoice(req, res) {
   const invoiceId = Number(req.params.id);
   if (!Number.isInteger(invoiceId) || invoiceId <= 0) {
@@ -890,18 +990,23 @@ async function removeInvoice(req, res) {
       });
     }
 
-    if (invoice.status !== "Draft") {
+    const isSuperAdmin = req.user?.role === "Super Admin";
+    if (!isSuperAdmin && invoice.status !== "Draft") {
       return res.status(409).json({
         success: false,
         message: "Only draft invoices can be deleted.",
       });
     }
 
-    const deleted = await invoiceModel.deleteInvoice(invoiceId, ownerId);
+    const deleted = await invoiceModel.deleteInvoice(invoiceId, ownerId, {
+      allowAnyStatus: isSuperAdmin,
+    });
     if (!deleted) {
       return res.status(409).json({
         success: false,
-        message: "Only draft invoices can be deleted.",
+        message: isSuperAdmin
+          ? "Invoice could not be deleted."
+          : "Only draft invoices can be deleted.",
       });
     }
 
@@ -915,7 +1020,9 @@ async function removeInvoice(req, res) {
 
     return res.status(200).json({
       success: true,
-      message: "Draft invoice deleted successfully.",
+      message: isSuperAdmin
+        ? "Invoice and related payment records deleted successfully."
+        : "Draft invoice deleted successfully.",
     });
   } catch (error) {
     console.error("Delete invoice error:", error);

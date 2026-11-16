@@ -1,7 +1,12 @@
 const db = require("../config/db");
 const { getPeriodCondition, normalizePeriod } = require("../utils/periodFilter");
 
-async function getPayments(userId, role, requestedPeriod) {
+async function getPayments(
+  userId,
+  role,
+  requestedPeriod,
+  { approvalQueue = false } = {}
+) {
   const period = normalizePeriod(requestedPeriod);
   if (!period) {
     throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
@@ -12,14 +17,20 @@ async function getPayments(userId, role, requestedPeriod) {
     conditions.push("p.received_by = ?");
     params.push(userId);
   }
+  if (approvalQueue) {
+    conditions.push("u.role = ?");
+    params.push("Admin");
+  }
 
   const [rows] = await db.execute(
     `SELECT
        p.payment_id,
+       CONCAT('PAY-', p.payment_id) AS payment_number,
        p.invoice_id,
        p.quotation_id,
        p.received_by,
        u.full_name AS received_by_name,
+       u.full_name AS recorded_by_name,
        p.payment_date,
        p.amount,
        p.payment_method,
@@ -27,6 +38,12 @@ async function getPayments(userId, role, requestedPeriod) {
        p.reference_number,
        p.payment_slip,
        p.payment_status,
+       CASE p.payment_status
+         WHEN 'Verified' THEN 'Approved'
+         WHEN 'Pending' THEN 'Pending Approval'
+         WHEN 'Rejected' THEN 'Rejected'
+         ELSE p.payment_status
+       END AS status,
        p.verified_by,
        verifier.full_name AS verified_by_name,
        p.verified_at,
@@ -225,6 +242,126 @@ async function createPendingPayment(payment) {
   try {
     await connection.beginTransaction();
 
+    if (payment.invoiceId) {
+      const ownerCondition =
+        payment.role === "Super Admin" ? "" : "AND created_by = ?";
+      const ownerParams =
+        payment.role === "Super Admin" ? [] : [payment.userId];
+      const [invoices] = await connection.execute(
+        `SELECT
+           invoice_id,
+           customer_id,
+           quotation_id,
+           amount_paid,
+           balance_due,
+           status
+         FROM invoices
+         WHERE invoice_id = ?
+           ${ownerCondition}
+         FOR UPDATE`,
+        [payment.invoiceId, ...ownerParams]
+      );
+
+      if (invoices.length === 0) {
+        const error = new Error("Invoice was not found or is not accessible.");
+        error.code = "INVOICE_NOT_FOUND";
+        throw error;
+      }
+
+      const invoice = invoices[0];
+      if (
+        payment.customerId != null &&
+        Number(invoice.customer_id) !== Number(payment.customerId)
+      ) {
+        const error = new Error(
+          "Selected customer does not match the selected invoice."
+        );
+        error.code = "QUOTATION_CUSTOMER_MISMATCH";
+        throw error;
+      }
+      if (
+        payment.quotationId != null &&
+        Number(invoice.quotation_id) !== Number(payment.quotationId)
+      ) {
+        const error = new Error(
+          "Selected quotation does not match the selected invoice."
+        );
+        error.code = "QUOTATION_NOT_FOUND";
+        throw error;
+      }
+      if (invoice.status === "Cancelled") {
+        const error = new Error(
+          "Payments cannot be submitted for a cancelled invoice."
+        );
+        error.code = "INVOICE_CANCELLED";
+        throw error;
+      }
+
+      const [[pendingPayments]] = await connection.execute(
+        `SELECT COALESCE(SUM(amount), 0) AS pending_amount
+         FROM payments
+         WHERE invoice_id = ?
+           AND payment_status = 'Pending'`,
+        [payment.invoiceId]
+      );
+
+      const paymentType =
+        Number(
+          (
+            Number(invoice.balance_due) -
+            Number(pendingPayments.pending_amount) -
+            payment.amount
+          ).toFixed(2)
+        ) <= 0
+          ? "Full Payment"
+          : Number(invoice.amount_paid) === 0
+            ? "Advance"
+            : "Partial";
+      if (
+        Number(
+          (payment.amount + Number(pendingPayments.pending_amount)).toFixed(2)
+        ) > Number(invoice.balance_due)
+      ) {
+        const error = new Error(
+          "Payment amount exceeds the invoice balance due."
+        );
+        error.code = "PAYMENT_EXCEEDS_INVOICE_BALANCE";
+        throw error;
+      }
+
+      const [result] = await connection.execute(
+        `INSERT INTO payments (
+           invoice_id,
+           quotation_id,
+           received_by,
+           payment_date,
+           amount,
+           payment_method,
+           reference_number,
+           notes,
+           payment_type,
+           payment_slip,
+           payment_status
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')`,
+        [
+          invoice.invoice_id,
+          invoice.quotation_id,
+          payment.userId,
+          payment.paymentDate,
+          payment.amount,
+          payment.paymentMethod,
+          payment.referenceNumber || null,
+          payment.notes || null,
+          paymentType,
+          payment.paymentSlip,
+        ]
+      );
+
+      await connection.commit();
+      return result.insertId;
+    }
+
     const ownerCondition =
       payment.role === "Super Admin" ? "" : "AND created_by = ?";
     const ownerParams =
@@ -256,12 +393,20 @@ async function createPendingPayment(payment) {
     }
 
     const [existingPayments] = await connection.execute(
-      `SELECT COALESCE(SUM(amount), 0) AS reserved_amount
+      `SELECT
+         COALESCE(SUM(amount), 0) AS reserved_amount,
+         COALESCE(SUM(
+           CASE WHEN payment_status = 'Pending' THEN amount ELSE 0 END
+         ), 0) AS pending_amount,
+         COALESCE(SUM(
+           CASE WHEN payment_status = 'Verified' THEN amount ELSE 0 END
+         ), 0) AS verified_amount
        FROM payments
        WHERE quotation_id = ?
          AND payment_status <> 'Rejected'`,
       [payment.quotationId]
     );
+
     const reservedAmount = Number(existingPayments[0].reserved_amount);
     const remainingAmount = Number(
       (Number(quotation.total_amount) - reservedAmount).toFixed(2)
@@ -274,6 +419,13 @@ async function createPendingPayment(payment) {
       error.code = "PAYMENT_EXCEEDS_QUOTATION_TOTAL";
       throw error;
     }
+
+    const paymentType =
+      payment.amount >= remainingAmount
+        ? "Full Payment"
+        : Number(existingPayments[0].verified_amount) === 0
+          ? "Advance"
+          : "Partial";
 
     const [invoices] = await connection.execute(
       `SELECT invoice_id
@@ -337,7 +489,7 @@ async function createPendingPayment(payment) {
         payment.paymentMethod,
         payment.referenceNumber || null,
         payment.notes || null,
-        payment.paymentType,
+        paymentType,
         payment.paymentSlip,
       ]
     );
@@ -412,6 +564,7 @@ async function verifyPayment(paymentId, verifiedBy) {
     }
 
     let invoice = null;
+    let updatedInvoiceAmounts = null;
     if (payment.quotation_id) {
       const [verifiedRows] = await connection.execute(
         `SELECT COALESCE(SUM(amount), 0) AS verified_amount
@@ -493,6 +646,12 @@ async function verifyPayment(paymentId, verifiedBy) {
          WHERE invoice_id = ?`,
         [amountPaid, balanceDue, balanceDue, invoice.invoice_id]
       );
+      updatedInvoiceAmounts = {
+        amount_paid: amountPaid,
+        paid_amount: amountPaid,
+        balance_due: balanceDue,
+        remaining_amount: balanceDue,
+      };
     }
 
     await connection.commit();
@@ -502,6 +661,7 @@ async function verifyPayment(paymentId, verifiedBy) {
       amount: Number(payment.amount),
       payment_status: "Verified",
       invoice_id: payment.invoice_id,
+      ...updatedInvoiceAmounts,
     };
   } catch (error) {
     await connection.rollback();

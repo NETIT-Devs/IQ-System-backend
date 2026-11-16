@@ -37,8 +37,6 @@ const paymentMethods = new Set([
   "Online",
   "Other",
 ]);
-const paymentTypes = new Set(["Advance", "Partial", "Full Payment"]);
-
 function isPositiveInteger(value) {
   return Number.isInteger(Number(value)) && Number(value) > 0;
 }
@@ -138,7 +136,9 @@ async function getPayments(req, res) {
 
   try {
     const [payments, summary, companySettings] = await Promise.all([
-      paymentModel.getPayments(req.user.user_id, req.user.role, period),
+      paymentModel.getPayments(req.user.user_id, req.user.role, period, {
+        approvalQueue: req.query.approval_queue === "true",
+      }),
       paymentModel.getPaymentSummary(req.user.user_id, req.user.role, period),
       getCompanySettings(),
     ]);
@@ -164,22 +164,27 @@ async function addPayment(req, res) {
   const payment = req.body || {};
   const customerId = Number(payment.customer_id);
   const quotationId = Number(payment.quotation_id);
+  const invoiceId = Number(payment.invoice_id);
   const amount = getPaymentAmount(payment.amount);
+  const hasInvoiceId = isPositiveInteger(payment.invoice_id);
+  const hasQuotationId = isPositiveInteger(payment.quotation_id);
 
   let validationMessage = null;
   if (!file) {
     validationMessage = "Payment slip is required.";
   } else if (
-    !isPositiveInteger(payment.customer_id) ||
-    !isPositiveInteger(payment.quotation_id)
+    (!hasInvoiceId && !hasQuotationId) ||
+    (hasQuotationId && !hasInvoiceId && !isPositiveInteger(payment.customer_id)) ||
+    (payment.customer_id !== undefined &&
+      payment.customer_id !== "" &&
+      !isPositiveInteger(payment.customer_id))
   ) {
-    validationMessage = "A valid customer_id and quotation_id are required.";
+    validationMessage =
+      "A valid invoice_id or quotation_id is required; customer_id is required for quotation payments.";
   } else if (!isValidDate(payment.payment_date)) {
     validationMessage = "Invalid payment_date. Use YYYY-MM-DD format.";
   } else if (!paymentMethods.has(payment.payment_method)) {
     validationMessage = "Invalid payment_method.";
-  } else if (!paymentTypes.has(payment.payment_type)) {
-    validationMessage = "Invalid payment_type.";
   } else if (!amount) {
     validationMessage = "Payment amount must be a positive amount with up to two decimals.";
   } else if (
@@ -215,12 +220,12 @@ async function addPayment(req, res) {
     const paymentId = await paymentModel.createPendingPayment({
       userId: req.user.user_id,
       role: req.user.role,
-      customerId,
-      quotationId,
+      customerId: isPositiveInteger(payment.customer_id) ? customerId : null,
+      quotationId: hasQuotationId ? quotationId : null,
+      invoiceId: hasInvoiceId ? invoiceId : null,
       paymentDate: payment.payment_date,
       amount,
       paymentMethod: payment.payment_method,
-      paymentType: payment.payment_type,
       referenceNumber: payment.reference_number?.trim(),
       notes: payment.notes?.trim(),
       paymentSlip: `/uploads/payment-slips/${file.filename}`,

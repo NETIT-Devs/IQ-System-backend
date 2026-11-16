@@ -169,7 +169,14 @@ function getCustomerData(invoice) {
 // Use the selected customer or create one from the supplied customer details.
 async function resolveCustomerId(connection, invoice) {
   if (invoice.customer_id) {
-    return invoice.customer_id;
+    return createCustomer(
+      {
+        ...getCustomerData(invoice),
+        customer_id: invoice.customer_id,
+        created_by: invoice.created_by,
+      },
+      connection
+    );
   }
 
   return createCustomer(
@@ -182,7 +189,10 @@ async function resolveCustomerId(connection, invoice) {
 }
 
 // Attach invoice line items to each invoice row.
-async function addInvoiceItems(invoices) {
+async function addInvoiceItems(
+  invoices,
+  { includePendingPaymentTotals = false } = {}
+) {
   for (const invoice of invoices) {
     const [items] = await db.execute(
       `SELECT
@@ -223,6 +233,29 @@ async function addInvoiceItems(invoices) {
       [invoice.invoice_id]
     );
     invoice.payment_history = payments;
+
+    if (includePendingPaymentTotals) {
+      const verifiedAmount = Number(invoice.amount_paid || 0);
+      const pendingAmount = payments
+        .filter((payment) => payment.payment_status === "Pending")
+        .reduce((total, payment) => total + Number(payment.amount), 0);
+      const verifiedBalance = Number(invoice.balance_due || 0);
+      const displayedPaidAmount = Number(
+        (verifiedAmount + pendingAmount).toFixed(2)
+      );
+      const availableBalance = Number(
+        Math.max(verifiedBalance - pendingAmount, 0).toFixed(2)
+      );
+
+      invoice.verified_amount_paid = verifiedAmount;
+      invoice.pending_payment_amount = Number(pendingAmount.toFixed(2));
+      invoice.amount_paid = displayedPaidAmount;
+      invoice.paid_amount = displayedPaidAmount;
+      invoice.verified_balance_due = verifiedBalance;
+      invoice.balance_due = availableBalance;
+      invoice.remaining_amount = availableBalance;
+      invoice.available_payment_amount = availableBalance;
+    }
   }
 }
 
@@ -242,8 +275,17 @@ async function getAllInvoices(createdBy, requestedPeriod) {
   const [rows] = await db.execute(
     `SELECT
        i.*,
+       i.amount_paid AS paid_amount,
+       i.balance_due AS remaining_amount,
+       (
+         SELECT COALESCE(SUM(p.amount), 0)
+         FROM payments p
+         WHERE p.invoice_id = i.invoice_id
+           AND p.payment_status = 'Pending'
+       ) AS pending_payment_amount,
        c.customer_name,
        c.company_name AS customer_company,
+       c.email AS email,
        c.email AS customer_email,
        c.phone AS customer_phone,
        c.address AS customer_address
@@ -255,7 +297,9 @@ async function getAllInvoices(createdBy, requestedPeriod) {
     params
   );
 
-  await addInvoiceItems(rows);
+  await addInvoiceItems(rows, {
+    includePendingPaymentTotals: createdBy == null,
+  });
   return rows;
 }
 
@@ -269,8 +313,17 @@ async function getPendingInvoiceApprovals(requestedPeriod) {
   const [rows] = await db.execute(
     `SELECT
        i.*,
+       i.amount_paid AS paid_amount,
+       i.balance_due AS remaining_amount,
+       (
+         SELECT COALESCE(SUM(p.amount), 0)
+         FROM payments p
+         WHERE p.invoice_id = i.invoice_id
+           AND p.payment_status = 'Pending'
+       ) AS pending_payment_amount,
        c.customer_name,
        c.company_name AS customer_company,
+       c.email AS email,
        c.email AS customer_email,
        c.phone AS customer_phone,
        c.address AS customer_address
@@ -287,12 +340,30 @@ async function getPendingInvoiceApprovals(requestedPeriod) {
 }
 
 // Return quotations that can be converted into invoices for one customer.
-async function getInvoiceEligibleQuotations(customerId) {
+async function getInvoiceEligibleQuotations(customerId, invoiceId, createdBy) {
+  const invoiceCondition =
+    invoiceId === undefined || invoiceId === null
+      ? ""
+      : `OR EXISTS (
+           SELECT 1
+           FROM invoices current_invoice
+           WHERE current_invoice.quotation_id = q.quotation_id
+             AND current_invoice.invoice_id = ?
+             ${createdBy == null ? "" : "AND current_invoice.created_by = ?"}
+         )`;
+  const params = [customerId];
+  if (invoiceId !== undefined && invoiceId !== null) {
+    params.push(invoiceId);
+    if (createdBy != null) params.push(createdBy);
+  }
   const [rows] = await db.execute(
     `SELECT
        q.quotation_id,
        q.quotation_number,
        q.customer_id,
+       c.customer_name,
+       c.email AS email,
+       c.email AS customer_email,
        q.quotation_date,
        q.currency,
        q.total_amount,
@@ -306,6 +377,8 @@ async function getInvoiceEligibleQuotations(customerId) {
            AND p.payment_status = 'Verified'
        ) AS verified_payment_amount
      FROM quotations q
+     INNER JOIN customers c
+       ON c.customer_id = q.customer_id
      WHERE q.customer_id = ?
        AND q.approval_status = 'Approved'
        AND EXISTS (
@@ -313,20 +386,27 @@ async function getInvoiceEligibleQuotations(customerId) {
          FROM quotation_items qi
          WHERE qi.quotation_id = q.quotation_id
        )
-       AND NOT EXISTS (
-         SELECT 1
-         FROM invoices i
-         WHERE i.quotation_id = q.quotation_id
+       AND (
+         NOT EXISTS (
+           SELECT 1
+           FROM invoices i
+           WHERE i.quotation_id = q.quotation_id
+         )
+         ${invoiceCondition}
        )
      ORDER BY q.quotation_id DESC`,
-    [customerId]
+    params
   );
 
   return rows;
 }
 
 // Retrieve one invoice and its line items, optionally checking its owner.
-async function getInvoiceById(invoiceId, createdBy) {
+async function getInvoiceById(
+  invoiceId,
+  createdBy,
+  { includePendingPaymentTotals = false } = {}
+) {
   const ownerCondition =
     createdBy === undefined || createdBy === null
       ? ""
@@ -339,8 +419,17 @@ async function getInvoiceById(invoiceId, createdBy) {
   const [rows] = await db.execute(
     `SELECT
        i.*,
+       i.amount_paid AS paid_amount,
+       i.balance_due AS remaining_amount,
+       (
+         SELECT COALESCE(SUM(p.amount), 0)
+         FROM payments p
+         WHERE p.invoice_id = i.invoice_id
+           AND p.payment_status = 'Pending'
+       ) AS pending_payment_amount,
        c.customer_name,
        c.company_name AS customer_company,
+       c.email AS email,
        c.email AS customer_email,
        c.phone AS customer_phone,
        c.address AS customer_address
@@ -357,7 +446,7 @@ async function getInvoiceById(invoiceId, createdBy) {
     return null;
   }
 
-  await addInvoiceItems(rows);
+  await addInvoiceItems(rows, { includePendingPaymentTotals });
   return rows[0];
 }
 
@@ -748,16 +837,35 @@ async function updateInvoice(invoiceId, invoice, items, createdBy) {
       );
     }
 
+    const [[customer]] = await connection.execute(
+      `SELECT
+         c.email,
+         (
+           SELECT COALESCE(SUM(p.amount), 0)
+           FROM payments p
+           WHERE p.invoice_id = ?
+             AND p.payment_status = 'Pending'
+         ) AS pending_payment_amount
+       FROM customers c
+       WHERE c.customer_id = ?`,
+      [invoiceId, customerId]
+    );
+
     await connection.commit();
     return {
       invoice_id: invoiceId,
+      email: customer.email,
+      customer_email: customer.email,
       currency: calculated.invoice.currency,
       subtotal: calculated.invoice.subtotal,
       discount_amount: calculated.invoice.discount_amount,
       tax_amount: calculated.invoice.tax_amount,
       total_amount: calculated.invoice.total_amount,
       amount_paid: calculated.invoice.amount_paid,
+      paid_amount: calculated.invoice.amount_paid,
       balance_due: calculated.invoice.balance_due,
+      remaining_amount: calculated.invoice.balance_due,
+      pending_payment_amount: Number(customer.pending_payment_amount),
       status: updatedStatus,
     };
   } catch (error) {
@@ -768,13 +876,18 @@ async function updateInvoice(invoiceId, invoice, items, createdBy) {
   }
 }
 
-// Delete an invoice and its items only while its status is Draft.
-async function deleteInvoice(invoiceId, createdBy) {
+// Delete Draft invoices for their owner; Super Admin can delete any invoice.
+async function deleteInvoice(
+  invoiceId,
+  createdBy,
+  { allowAnyStatus = false } = {}
+) {
   const connection = await db.getConnection();
 
   try {
     await connection.beginTransaction();
 
+    const statusCondition = allowAnyStatus ? "" : "AND status = 'Draft'";
     const ownerCondition =
       createdBy === undefined || createdBy === null
         ? ""
@@ -785,7 +898,7 @@ async function deleteInvoice(invoiceId, createdBy) {
       `SELECT invoice_id
        FROM invoices
        WHERE invoice_id = ?
-         AND status = 'Draft'
+         ${statusCondition}
          ${ownerCondition}
        FOR UPDATE`,
       [invoiceId, ...ownerParams]
@@ -796,18 +909,25 @@ async function deleteInvoice(invoiceId, createdBy) {
       return false;
     }
 
-    const [[paymentCount]] = await connection.execute(
-      `SELECT COUNT(*) AS payment_count
-       FROM payments
-       WHERE invoice_id = ?`,
-      [invoiceId]
-    );
-    if (Number(paymentCount.payment_count) > 0) {
-      const error = new Error(
-        "Invoices with payment records cannot be deleted."
+    if (allowAnyStatus) {
+      await connection.execute(
+        "DELETE FROM payments WHERE invoice_id = ?",
+        [invoiceId]
       );
-      error.code = "INVOICE_HAS_PAYMENTS";
-      throw error;
+    } else {
+      const [[paymentCount]] = await connection.execute(
+        `SELECT COUNT(*) AS payment_count
+         FROM payments
+         WHERE invoice_id = ?`,
+        [invoiceId]
+      );
+      if (Number(paymentCount.payment_count) > 0) {
+        const error = new Error(
+          "Invoices with payment records cannot be deleted."
+        );
+        error.code = "INVOICE_HAS_PAYMENTS";
+        throw error;
+      }
     }
 
     await connection.execute(
@@ -817,7 +937,7 @@ async function deleteInvoice(invoiceId, createdBy) {
     await connection.execute(
       `DELETE FROM invoices
        WHERE invoice_id = ?
-         AND status = 'Draft'
+         ${statusCondition}
          ${ownerCondition}`,
       [invoiceId, ...ownerParams]
     );

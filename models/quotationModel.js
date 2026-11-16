@@ -73,13 +73,6 @@ function buildQuotationFilters(filters = {}) {
 
   if (forInvoice) {
     conditions.push("q.approval_status = 'Approved'");
-    conditions.push(
-      `NOT EXISTS (
-        SELECT 1
-        FROM invoices i
-        WHERE i.quotation_id = q.quotation_id
-      )`
-    );
   }
 
   if (status) {
@@ -128,6 +121,7 @@ async function getAllQuotations(filters = {}) {
       q.customer_id,
       c.customer_name,
       c.company_name AS customer_company,
+      c.email AS email,
       c.email AS customer_email,
       c.phone AS customer_phone,
       c.address AS customer_address,
@@ -226,6 +220,7 @@ async function getQuotationById(quotationId, createdBy) {
       q.customer_id,
       c.customer_name,
       c.company_name AS customer_company,
+      c.email AS email,
       c.email AS customer_email,
       c.phone AS customer_phone,
       c.address AS customer_address,
@@ -320,6 +315,7 @@ async function createQuotationWithItems(quotation, items) {
 
     const customerId = await createCustomer(
       {
+        customer_id: quotation.customer_id,
         customer_name: quotation.customer_name,
         company_name: quotation.company_name,
         email: quotation.email,
@@ -457,6 +453,7 @@ async function updateQuotationWithItems(
 
     const customerId = await createCustomer(
       {
+        customer_id: quotation.customer_id,
         customer_name: quotation.customer_name,
         company_name: quotation.company_name,
         email: quotation.email,
@@ -564,7 +561,11 @@ async function updateQuotationWithItems(
   }
 }
 
-async function deleteQuotationById(quotationId, createdBy) {
+async function deleteQuotationById(
+  quotationId,
+  createdBy,
+  { cascadeLinkedInvoices = false } = {}
+) {
   const connection = await db.getConnection();
 
   try {
@@ -593,13 +594,37 @@ async function deleteQuotationById(quotationId, createdBy) {
       `SELECT invoice_id
        FROM invoices
        WHERE quotation_id = ?
-       LIMIT 1`,
+       FOR UPDATE`,
       [quotationId]
     );
 
-    if (invoices.length > 0) {
+    if (invoices.length > 0 && !cascadeLinkedInvoices) {
       await connection.rollback();
       return { deleted: false, reason: "linked_invoice" };
+    }
+
+    if (cascadeLinkedInvoices) {
+      await connection.execute(
+        "DELETE FROM payments WHERE quotation_id = ?",
+        [quotationId]
+      );
+
+      if (invoices.length > 0) {
+        const invoiceIds = invoices.map((invoice) => invoice.invoice_id);
+        const placeholders = invoiceIds.map(() => "?").join(", ");
+        await connection.execute(
+          `DELETE FROM payments WHERE invoice_id IN (${placeholders})`,
+          invoiceIds
+        );
+        await connection.execute(
+          `DELETE FROM invoice_items WHERE invoice_id IN (${placeholders})`,
+          invoiceIds
+        );
+        await connection.execute(
+          "DELETE FROM invoices WHERE quotation_id = ?",
+          [quotationId]
+        );
+      }
     }
 
     await connection.execute(

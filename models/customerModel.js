@@ -21,7 +21,7 @@ async function getAllCustomers({
 
   if (search) {
     conditions.push(
-      "(customer_name LIKE ? OR CAST(customer_id AS CHAR) LIKE ?)"
+      "(customers.customer_name LIKE ? OR CAST(customers.customer_id AS CHAR) LIKE ?)"
     );
     params.push(`%${search}%`, `%${search}%`);
   }
@@ -45,19 +45,21 @@ async function getAllCustomers({
     );
   }
 
+  const invoiceOwnerCondition =
+    createdBy == null ? "" : "WHERE i.created_by = ?";
   const [rows] = await db.execute(
     `SELECT
-       customer_id,
-       customer_name,
-       company_name,
-       email,
-       phone,
-       address,
-       city,
-       country,
-       tax_number,
-       notes,
-       created_by,
+       customers.customer_id,
+       customers.customer_name,
+       customers.company_name,
+       customers.email,
+       customers.phone,
+       customers.address,
+       customers.city,
+       customers.country,
+       customers.tax_number,
+       customers.notes,
+       customers.created_by,
        (
          SELECT COUNT(*)
          FROM quotations q
@@ -70,14 +72,39 @@ async function getAllCustomers({
          WHERE i.customer_id = customers.customer_id
            ${createdBy == null ? "" : "AND i.created_by = ?"}
        ) AS invoice_count,
-       created_at,
-       updated_at
+       COALESCE(invoice_summary.draft_invoice_count, 0) AS draft_invoice_count,
+       COALESCE(invoice_summary.issued_invoice_count, 0) AS issued_invoice_count,
+       COALESCE(invoice_summary.overdue_invoice_count, 0) AS overdue_invoice_count,
+       COALESCE(invoice_summary.cancelled_invoice_count, 0) AS cancelled_invoice_count,
+       COALESCE(invoice_summary.paid_invoice_count, 0) AS paid_invoice_count,
+       COALESCE(invoice_summary.invoice_total_amount, 0) AS invoice_total_amount,
+       COALESCE(invoice_summary.invoice_amount_paid, 0) AS invoice_amount_paid,
+       COALESCE(invoice_summary.invoice_balance_due, 0) AS invoice_balance_due,
+       customers.created_at,
+       customers.updated_at
      FROM customers
+     LEFT JOIN (
+       SELECT
+         i.customer_id,
+         SUM(i.status = 'Draft') AS draft_invoice_count,
+         SUM(i.status = 'Issued') AS issued_invoice_count,
+         SUM(i.status = 'Overdue') AS overdue_invoice_count,
+         SUM(i.status = 'Cancelled') AS cancelled_invoice_count,
+         SUM(i.status = 'Paid') AS paid_invoice_count,
+         COALESCE(SUM(i.total_amount), 0) AS invoice_total_amount,
+         COALESCE(SUM(i.amount_paid), 0) AS invoice_amount_paid,
+         COALESCE(SUM(i.balance_due), 0) AS invoice_balance_due
+       FROM invoices i
+       ${invoiceOwnerCondition}
+       GROUP BY i.customer_id
+     ) invoice_summary
+       ON invoice_summary.customer_id = customers.customer_id
      ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
-     ORDER BY customer_id DESC`,
+     ORDER BY customers.customer_id DESC`,
     createdBy == null
       ? params
       : [
+          createdBy,
           createdBy,
           createdBy,
           ...params,
@@ -134,6 +161,7 @@ async function createCustomer(
   } = {}
 ) {
   const {
+    customer_id,
     customer_name,
     company_name,
     email,
@@ -149,6 +177,36 @@ async function createCustomer(
   const name = String(customer_name || "").trim();
   const normalizedEmail = String(email || "").trim().toLowerCase();
   const normalizedPhone = String(phone || "").trim();
+
+  if (customer_id !== undefined && customer_id !== null) {
+    const normalizedCustomerId = Number(customer_id);
+    if (!Number.isInteger(normalizedCustomerId) || normalizedCustomerId <= 0) {
+      throw new Error("Customer ID must be a valid positive integer.");
+    }
+
+    const [existingCustomers] = await connection.execute(
+      `SELECT customer_id, email
+       FROM customers
+       WHERE customer_id = ?
+       LIMIT 1`,
+      [normalizedCustomerId]
+    );
+    if (existingCustomers.length === 0) {
+      throw new Error("Selected customer was not found.");
+    }
+
+    if (normalizedEmail) {
+      await connection.execute(
+        `UPDATE customers
+         SET email = ?
+         WHERE customer_id = ?`,
+        [normalizedEmail, normalizedCustomerId]
+      );
+    } else if (!String(existingCustomers[0].email || "").trim()) {
+      throw new Error("Customer email is required.");
+    }
+    return normalizedCustomerId;
+  }
 
   if (!name) {
     throw new Error("Customer name is required.");
@@ -220,6 +278,14 @@ async function createCustomer(
   }
 
   if (existingByName.length > 0) {
+    if (matchByNameOnly && normalizedEmail) {
+      await connection.execute(
+        `UPDATE customers
+         SET email = ?
+         WHERE customer_id = ?`,
+        [normalizedEmail, existingByName[0].customer_id]
+      );
+    }
     return existingByName[0].customer_id;
   }
 

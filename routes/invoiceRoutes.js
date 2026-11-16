@@ -67,7 +67,7 @@ router.post("/:id/payments", authMiddleware, recordPayment);
 // Update an existing invoice.
 router.put("/:id", authMiddleware, editInvoice);
 
-// Delete a Draft invoice.
+// Admins can delete their own Draft invoices; Super Admin can delete any invoice.
 router.delete("/:id", authMiddleware, removeInvoice);
 
 module.exports = router;

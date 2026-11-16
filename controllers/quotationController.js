@@ -159,6 +159,12 @@ function validateQuotationData(body) {
     );
   }
 
+  if (typeof email !== "string" || !email.trim()) {
+    errors.push("Customer email is required.");
+  } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    errors.push("A valid customer email is required.");
+  }
+
   if (!isValidDate(quotation_date)) {
     errors.push("A valid quotation date is required (YYYY-MM-DD).");
   }
@@ -257,7 +263,7 @@ function validateQuotationData(body) {
       const taxRate = Number(item?.tax_rate ?? 0);
 
       if (!itemName) {
-        errors.push(`Item ${index + 1}: item name is required.`);
+        errors.push(`Item ${index + 1}: Select Service is required.`);
       }
 
       if (!Number.isFinite(unitPrice) || unitPrice < 0) {
@@ -791,7 +797,8 @@ async function deleteQuotation(req, res) {
 
     const result = await deleteQuotationById(
       quotationId,
-      getQuotationOwnerId(req)
+      getQuotationOwnerId(req),
+      { cascadeLinkedInvoices: req.user?.role === "Super Admin" }
     );
 
     if (!result.deleted) {
@@ -826,7 +833,10 @@ async function deleteQuotation(req, res) {
 
     return res.status(200).json({
       success: true,
-      message: "Quotation deleted successfully.",
+      message:
+        req.user?.role === "Super Admin"
+          ? "Quotation, linked invoices, and related payment records deleted successfully."
+          : "Quotation deleted successfully.",
     });
   } catch (error) {
     console.error("Delete quotation error:", error);
