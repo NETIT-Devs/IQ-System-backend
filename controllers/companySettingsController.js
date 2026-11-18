@@ -19,6 +19,7 @@ const editableFields = [
   "bank_branch",
   "bank_swift_code",
   "default_terms_and_conditions",
+  "pdf_footer_note",
 ];
 
 async function getCompanySettings(req, res) {
@@ -76,6 +77,16 @@ async function updateCompanySettings(req, res) {
           message: `${field} must be a string or null.`,
         });
       }
+    }
+
+    if (
+      settings.pdf_footer_note !== null &&
+      settings.pdf_footer_note.length > 10000
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "pdf_footer_note must be 10000 characters or fewer.",
+      });
     }
 
     const companySettings = await saveCompanySettings(

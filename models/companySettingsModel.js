@@ -17,6 +17,7 @@ async function getCompanySettings() {
        bank_branch,
        bank_swift_code,
        default_terms_and_conditions,
+       pdf_footer_note,
        updated_by,
        created_at,
        updated_at
@@ -44,6 +45,7 @@ async function saveCompanySettings(settings, updatedBy) {
     settings.bank_branch ?? null,
     settings.bank_swift_code ?? null,
     settings.default_terms_and_conditions ?? null,
+    settings.pdf_footer_note ?? null,
     updatedBy ?? null,
   ];
 
@@ -62,6 +64,7 @@ async function saveCompanySettings(settings, updatedBy) {
            bank_branch = ?,
            bank_swift_code = ?,
            default_terms_and_conditions = ?,
+           pdf_footer_note = ?,
            updated_by = ?
        WHERE setting_id = ?`,
       [...values, existing.setting_id]
@@ -81,9 +84,10 @@ async function saveCompanySettings(settings, updatedBy) {
          bank_branch,
          bank_swift_code,
          default_terms_and_conditions,
+         pdf_footer_note,
          updated_by
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       values
     );
   }

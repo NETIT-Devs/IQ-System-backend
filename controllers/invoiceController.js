@@ -286,15 +286,33 @@ function validateInvoice(invoice, items, { existingDueDate } = {}) {
     return "Invalid invoice_date. Use YYYY-MM-DD format.";
   }
 
-  const customerEmail = String(getCustomerData(invoice).email || "").trim();
-  if (!customerEmail && !invoice.customer_id && !canUseQuotationItems) {
-    return "Customer email is required.";
-  }
+  const customerData = getCustomerData(invoice);
+  const customerEmail = customerData.email;
   if (
-    customerEmail &&
-    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail)
+    customerEmail !== undefined &&
+    customerEmail !== null &&
+    customerEmail !== "" &&
+    (typeof customerEmail !== "string" ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail.trim()))
   ) {
     return "A valid customer email is required.";
+  }
+
+  const customerPhone = customerData.phone;
+  if (
+    customerPhone !== undefined &&
+    customerPhone !== null &&
+    customerPhone !== "" &&
+    typeof customerPhone !== "string"
+  ) {
+    return "Customer phone must be a string.";
+  }
+  if (
+    (typeof customerPhone !== "string" || !customerPhone.trim()) &&
+    !invoice.customer_id &&
+    !canUseQuotationItems
+  ) {
+    return "Customer phone is required.";
   }
 
   if (
@@ -461,7 +479,8 @@ async function getInvoices(req, res) {
   try {
     const invoices = await invoiceModel.getAllInvoices(
       getOwnerId(req),
-      period
+      period,
+      String(req.query.search || "").trim()
     );
 
     return res.status(200).json({
@@ -720,6 +739,20 @@ async function getInvoice(req, res) {
 // Validate and create a manual or quotation-based invoice.
 async function addInvoice(req, res) {
   const invoice = req.body || {};
+  const quotationId = Number(invoice.quotation_id);
+  if (
+    invoice.quotation_id === undefined ||
+    invoice.quotation_id === null ||
+    String(invoice.quotation_id).trim() === "" ||
+    !Number.isInteger(quotationId) ||
+    quotationId <= 0
+  ) {
+    return res.status(400).json({
+      success: false,
+      message: "An approved quotation is required to create an invoice.",
+    });
+  }
+
   const items = invoice.items;
   const validationError = validateInvoice(invoice, items);
 
@@ -771,9 +804,16 @@ async function addInvoice(req, res) {
   } catch (error) {
     console.error("Create invoice error:", error);
 
+    if (error.code === "QUOTATION_REQUIRED") {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
     if (
       error.message === "Customer name is required." ||
-      error.message === "Customer email is required." ||
+      error.message === "Customer phone is required." ||
       error.message === "Selected customer was not found."
     ) {
       return res.status(400).json({
@@ -926,7 +966,7 @@ async function editInvoice(req, res) {
 
     if (
       error.message === "Customer name is required." ||
-      error.message === "Customer email is required." ||
+      error.message === "Customer phone is required." ||
       error.message === "Selected customer was not found."
     ) {
       return res.status(400).json({

@@ -175,7 +175,8 @@ async function resolveCustomerId(connection, invoice) {
         customer_id: invoice.customer_id,
         created_by: invoice.created_by,
       },
-      connection
+      connection,
+      { requirePhone: true }
     );
   }
 
@@ -184,7 +185,8 @@ async function resolveCustomerId(connection, invoice) {
       ...getCustomerData(invoice),
       created_by: invoice.created_by,
     },
-    connection
+    connection,
+    { requirePhone: true }
   );
 }
 
@@ -260,7 +262,7 @@ async function addInvoiceItems(
 }
 
 // List invoices, optionally restricted to the creating administrator.
-async function getAllInvoices(createdBy, requestedPeriod) {
+async function getAllInvoices(createdBy, requestedPeriod, search = "") {
   const period = normalizePeriod(requestedPeriod);
   if (!period) {
     throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
@@ -270,6 +272,16 @@ async function getAllInvoices(createdBy, requestedPeriod) {
   if (createdBy !== undefined && createdBy !== null) {
     conditions.push("i.created_by = ?");
     params.push(createdBy);
+    conditions.push(
+      "i.approval_status IN ('Approved', 'Not Required')"
+    );
+  }
+  if (String(search).trim()) {
+    const searchTerm = `%${String(search).trim()}%`;
+    conditions.push(
+      "(i.invoice_number LIKE ? OR c.customer_name LIKE ? OR c.phone LIKE ?)"
+    );
+    params.push(searchTerm, searchTerm, searchTerm);
   }
 
   const [rows] = await db.execute(
@@ -573,6 +585,21 @@ async function createInvoice(
   items = [],
   { returnDetails = false, approvalStatus = "Not Required" } = {}
 ) {
+  const quotationId = Number(invoice?.quotation_id);
+  if (
+    invoice?.quotation_id === undefined ||
+    invoice?.quotation_id === null ||
+    String(invoice.quotation_id).trim() === "" ||
+    !Number.isInteger(quotationId) ||
+    quotationId <= 0
+  ) {
+    const error = new Error(
+      "An approved quotation is required to create an invoice."
+    );
+    error.code = "QUOTATION_REQUIRED";
+    throw error;
+  }
+
   const connection = await db.getConnection();
   let invoiceNumberLock;
 

@@ -95,11 +95,11 @@ function buildQuotationFilters(filters = {}) {
 
   if (search && String(search).trim()) {
     conditions.push(
-      "(q.quotation_number LIKE ? OR c.customer_name LIKE ?)"
+      "(q.quotation_number LIKE ? OR c.customer_name LIKE ? OR c.phone LIKE ?)"
     );
 
     const searchTerm = `%${String(search).trim()}%`;
-    params.push(searchTerm, searchTerm);
+    params.push(searchTerm, searchTerm, searchTerm);
   }
 
   return {
@@ -139,9 +139,21 @@ async function getAllQuotations(filters = {}) {
       q.total_amount,
       COALESCE(payment_totals.verified_amount, 0) AS amount_paid,
       GREATEST(
-        q.total_amount - COALESCE(payment_totals.verified_amount, 0),
+        q.total_amount
+          - COALESCE(payment_totals.verified_amount, 0)
+          - COALESCE(payment_totals.pending_amount, 0),
         0
       ) AS remaining_amount,
+      GREATEST(
+        q.total_amount
+          - COALESCE(payment_totals.verified_amount, 0)
+          - COALESCE(payment_totals.pending_amount, 0),
+        0
+      ) AS balance_due,
+      GREATEST(
+        q.total_amount - COALESCE(payment_totals.verified_amount, 0),
+        0
+      ) AS verified_remaining_amount,
       COALESCE(payment_totals.pending_amount, 0) AS pending_payment_amount,
       GREATEST(
         q.total_amount
@@ -238,9 +250,21 @@ async function getQuotationById(quotationId, createdBy) {
       q.total_amount,
       COALESCE(payment_totals.verified_amount, 0) AS amount_paid,
       GREATEST(
-        q.total_amount - COALESCE(payment_totals.verified_amount, 0),
+        q.total_amount
+          - COALESCE(payment_totals.verified_amount, 0)
+          - COALESCE(payment_totals.pending_amount, 0),
         0
       ) AS remaining_amount,
+      GREATEST(
+        q.total_amount
+          - COALESCE(payment_totals.verified_amount, 0)
+          - COALESCE(payment_totals.pending_amount, 0),
+        0
+      ) AS balance_due,
+      GREATEST(
+        q.total_amount - COALESCE(payment_totals.verified_amount, 0),
+        0
+      ) AS verified_remaining_amount,
       COALESCE(payment_totals.pending_amount, 0) AS pending_payment_amount,
       GREATEST(
         q.total_amount
@@ -307,7 +331,25 @@ async function getQuotationById(quotationId, createdBy) {
 }
 
 // Create quotation, customer (if needed), and quotation items atomically.
-async function createQuotationWithItems(quotation, items) {
+async function createQuotationWithItems(
+  quotation,
+  items,
+  { advancePaymentStatus = "Pending" } = {}
+) {
+  const advancePaymentAmount = Number(
+    quotation.advance_payment_amount ?? 0
+  );
+  if (
+    !Number.isFinite(advancePaymentAmount) ||
+    advancePaymentAmount < 0 ||
+    advancePaymentAmount > Number(quotation.total_amount) ||
+    Math.abs(advancePaymentAmount * 100 - Math.round(advancePaymentAmount * 100)) >
+      0.000001
+  ) {
+    const error = new Error("Invalid advance payment amount.");
+    error.code = "INVALID_ADVANCE_PAYMENT";
+    throw error;
+  }
   const connection = await db.getConnection();
 
   try {
@@ -328,7 +370,7 @@ async function createQuotationWithItems(quotation, items) {
         created_by: quotation.created_by,
       },
       connection,
-      { matchByNameOnly: true }
+      { matchByNameOnly: true, requirePhone: true }
     );
 
     const [result] = await connection.execute(
@@ -375,6 +417,39 @@ async function createQuotationWithItems(quotation, items) {
     );
 
     const quotationId = result.insertId;
+    if (advancePaymentAmount > 0) {
+      if (!["Pending", "Verified"].includes(advancePaymentStatus)) {
+        throw new Error("Invalid advance payment status.");
+      }
+
+      await connection.execute(
+        `INSERT INTO payments (
+           invoice_id,
+           quotation_id,
+           received_by,
+           payment_date,
+           amount,
+           payment_method,
+           notes,
+           payment_type,
+           payment_status,
+           verified_by,
+           verified_at
+         ) VALUES (NULL, ?, ?, ?, ?, 'Other', 'Advance payment entered with quotation', ?, ?, ?, CASE WHEN ? = 'Verified' THEN NOW() ELSE NULL END)`,
+        [
+          quotationId,
+          quotation.created_by,
+          quotation.quotation_date,
+          advancePaymentAmount,
+          advancePaymentAmount >= Number(quotation.total_amount)
+            ? "Full Payment"
+            : "Advance",
+          advancePaymentStatus,
+          advancePaymentStatus === "Verified" ? quotation.created_by : null,
+          advancePaymentStatus,
+        ]
+      );
+    }
 
     for (const item of items) {
       const unitPrice = Number(item.unit_price);
@@ -466,7 +541,7 @@ async function updateQuotationWithItems(
         created_by: quotation.created_by,
       },
       connection,
-      { matchByNameOnly: true }
+      { matchByNameOnly: true, requirePhone: true }
     );
 
     await connection.execute(

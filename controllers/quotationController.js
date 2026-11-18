@@ -120,6 +120,8 @@ function validateQuotationData(body) {
     discount_amount,
     notes,
     terms_and_conditions,
+    advance_payment_amount,
+    advance_payment,
     items,
     status,
     approval_status,
@@ -159,10 +161,28 @@ function validateQuotationData(body) {
     );
   }
 
-  if (typeof email !== "string" || !email.trim()) {
-    errors.push("Customer email is required.");
-  } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+  if (
+    email !== undefined &&
+    email !== null &&
+    email !== "" &&
+    (typeof email !== "string" ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()))
+  ) {
     errors.push("A valid customer email is required.");
+  }
+
+  if (
+    phone !== undefined &&
+    phone !== null &&
+    phone !== "" &&
+    typeof phone !== "string"
+  ) {
+    errors.push("Customer phone must be a string.");
+  } else if (
+    (typeof phone !== "string" || !phone.trim()) &&
+    !normalizedCustomerId
+  ) {
+    errors.push("Customer phone is required.");
   }
 
   if (!isValidDate(quotation_date)) {
@@ -324,6 +344,29 @@ function validateQuotationData(body) {
   const total = Number(
     (subtotal - discount + totalTax).toFixed(2)
   );
+  const rawAdvancePayment =
+    advance_payment_amount === undefined
+      ? advance_payment ?? 0
+      : advance_payment_amount;
+  const advancePaymentAmount =
+    rawAdvancePayment === "" ? 0 : Number(rawAdvancePayment);
+
+  if (
+    !Number.isFinite(advancePaymentAmount) ||
+    advancePaymentAmount < 0 ||
+    Math.abs(advancePaymentAmount * 100 - Math.round(advancePaymentAmount * 100)) >
+      0.000001
+  ) {
+    errors.push(
+      "Advance payment must be a non-negative amount with up to two decimals."
+    );
+  } else if (advancePaymentAmount > total) {
+    errors.push("Advance payment cannot exceed the quotation total.");
+  }
+
+  if (errors.length > 0) {
+    return { valid: false, errors };
+  }
 
   const startDate = project_start_date || quotation_date;
 
@@ -359,6 +402,7 @@ function validateQuotationData(body) {
       discount_amount: Number(discount.toFixed(2)),
       tax_amount: totalTax,
       total_amount: total,
+      advance_payment_amount: Number(advancePaymentAmount.toFixed(2)),
       status:
         status === "Pending Approval" ? "Sent" : status || "Draft",
       approval_status: approval_status || "Not Required",
@@ -599,7 +643,28 @@ async function addQuotation(req, res) {
         ...result.data,
         created_by: userId,
       },
-      result.items
+      result.items,
+      {
+        advancePaymentStatus:
+          req.user.role === "Admin" ? "Pending" : "Verified",
+      }
+    );
+    const advancePaymentAmount = Number(
+      result.data.advance_payment_amount || 0
+    );
+    const advancePaymentStatus =
+      req.user.role === "Admin" ? "Pending" : "Verified";
+    const verifiedAdvanceAmount =
+      advancePaymentStatus === "Verified" ? advancePaymentAmount : 0;
+    const pendingAdvanceAmount =
+      advancePaymentStatus === "Pending" ? advancePaymentAmount : 0;
+    const quotationBalance = Number(
+      Math.max(
+        0,
+        result.data.total_amount -
+          verifiedAdvanceAmount -
+          pendingAdvanceAmount
+      ).toFixed(2)
     );
 
     await createAuditLog({
@@ -630,6 +695,23 @@ async function addQuotation(req, res) {
       quotation_id: quotationId,
       status: result.data.status,
       approval_status: result.data.approval_status,
+      advance_payment_amount: advancePaymentAmount,
+      amount_paid: verifiedAdvanceAmount,
+      pending_payment_amount: pendingAdvanceAmount,
+      balance_due: quotationBalance,
+      remaining_amount: quotationBalance,
+      available_payment_amount: quotationBalance,
+      verified_remaining_amount: Number(
+        Math.max(
+          0,
+          result.data.total_amount - verifiedAdvanceAmount
+        ).toFixed(2)
+      ),
+      ...(advancePaymentAmount > 0
+        ? {
+            advance_payment_status: advancePaymentStatus,
+          }
+        : {}),
       totals: {
         subtotal: result.data.subtotal,
         discount_amount: result.data.discount_amount,
@@ -649,8 +731,16 @@ async function addQuotation(req, res) {
 
     if (
       error.message === "Selected customer was not found." ||
-      error.message === "Customer name is required."
+      error.message === "Customer name is required." ||
+      error.message === "Customer phone is required."
     ) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    if (error.code === "INVALID_ADVANCE_PAYMENT") {
       return res.status(400).json({
         success: false,
         message: error.message,
@@ -765,7 +855,8 @@ async function updateQuotation(req, res) {
 
     if (
       error.message === "Selected customer was not found." ||
-      error.message === "Customer name is required."
+      error.message === "Customer name is required." ||
+      error.message === "Customer phone is required."
     ) {
       return res.status(400).json({
         success: false,

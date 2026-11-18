@@ -115,17 +115,23 @@ async function addCustomer(req, res) {
       });
     }
 
-    if (typeof email !== "string" || !email.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "Customer email is required.",
-      });
-    }
-
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    if (
+      email !== undefined &&
+      email !== null &&
+      email !== "" &&
+      (typeof email !== "string" ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()))
+    ) {
       return res.status(400).json({
         success: false,
         message: "A valid customer email is required.",
+      });
+    }
+
+    if (typeof phone !== "string" || !phone.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer phone is required.",
       });
     }
 

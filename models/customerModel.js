@@ -26,7 +26,21 @@ async function getAllCustomers({
     params.push(`%${search}%`, `%${search}%`);
   }
 
-  conditions.push(getPeriodCondition("created_at", period));
+  conditions.push(
+    `(
+      ${getPeriodCondition("customers.created_at", period)}
+      OR EXISTS (
+        SELECT 1
+        FROM quotations q_period
+        WHERE q_period.customer_id = customers.customer_id
+          AND ${getPeriodCondition("q_period.quotation_date", period)}
+          ${createdBy == null ? "" : "AND q_period.created_by = ?"}
+      )
+    )`
+  );
+  if (createdBy != null) {
+    params.push(createdBy);
+  }
   if (createdBy != null) {
     conditions.push(
       `(customers.created_by = ?
@@ -158,6 +172,7 @@ async function createCustomer(
     matchByNameOnly = false,
     rejectExisting = false,
     claimSuperAdminCustomer = false,
+    requirePhone = false,
   } = {}
 ) {
   const {
@@ -177,6 +192,33 @@ async function createCustomer(
   const name = String(customer_name || "").trim();
   const normalizedEmail = String(email || "").trim().toLowerCase();
   const normalizedPhone = String(phone || "").trim();
+  const updateCustomerDetails = async (customerId) => {
+    await connection.execute(
+      `UPDATE customers
+       SET customer_name = COALESCE(NULLIF(?, ''), customer_name),
+           company_name = COALESCE(NULLIF(?, ''), company_name),
+           email = COALESCE(NULLIF(?, ''), email),
+           phone = COALESCE(NULLIF(?, ''), phone),
+           address = COALESCE(NULLIF(?, ''), address),
+           city = COALESCE(NULLIF(?, ''), city),
+           country = COALESCE(NULLIF(?, ''), country),
+           tax_number = COALESCE(NULLIF(?, ''), tax_number),
+           notes = COALESCE(NULLIF(?, ''), notes)
+       WHERE customer_id = ?`,
+      [
+        name,
+        String(company_name || "").trim(),
+        normalizedEmail,
+        normalizedPhone,
+        String(address || "").trim(),
+        String(city || "").trim(),
+        String(country || "").trim(),
+        String(tax_number || "").trim(),
+        String(notes || "").trim(),
+        customerId,
+      ]
+    );
+  };
 
   if (customer_id !== undefined && customer_id !== null) {
     const normalizedCustomerId = Number(customer_id);
@@ -185,7 +227,7 @@ async function createCustomer(
     }
 
     const [existingCustomers] = await connection.execute(
-      `SELECT customer_id, email
+      `SELECT customer_id, phone
        FROM customers
        WHERE customer_id = ?
        LIMIT 1`,
@@ -195,16 +237,14 @@ async function createCustomer(
       throw new Error("Selected customer was not found.");
     }
 
-    if (normalizedEmail) {
-      await connection.execute(
-        `UPDATE customers
-         SET email = ?
-         WHERE customer_id = ?`,
-        [normalizedEmail, normalizedCustomerId]
-      );
-    } else if (!String(existingCustomers[0].email || "").trim()) {
-      throw new Error("Customer email is required.");
+    if (
+      requirePhone &&
+      !normalizedPhone &&
+      !String(existingCustomers[0].phone || "").trim()
+    ) {
+      throw new Error("Customer phone is required.");
     }
+    await updateCustomerDetails(normalizedCustomerId);
     return normalizedCustomerId;
   }
 
@@ -223,7 +263,7 @@ async function createCustomer(
       : [name];
 
     const [existingCustomers] = await connection.execute(
-      `SELECT c.customer_id, c.created_by, u.role AS created_by_role
+      `SELECT c.customer_id, c.created_by, c.phone, u.role AS created_by_role
        FROM customers c
        LEFT JOIN users u
          ON u.user_id = c.created_by
@@ -238,6 +278,14 @@ async function createCustomer(
 
     if (existingCustomers.length > 0) {
       const existingCustomer = existingCustomers[0];
+      if (
+        requirePhone &&
+        !normalizedPhone &&
+        !String(existingCustomer.phone || "").trim()
+      ) {
+        throw new Error("Customer phone is required.");
+      }
+
       if (
         claimSuperAdminCustomer &&
         existingCustomer.created_by_role === "Super Admin"
@@ -269,7 +317,7 @@ async function createCustomer(
   let existingByName = [];
   if (!(rejectExisting && normalizedEmail)) {
     [existingByName] = await connection.execute(
-      `SELECT customer_id
+      `SELECT customer_id, phone
        FROM customers
        WHERE LOWER(TRIM(customer_name)) = LOWER(?)
        LIMIT 1`,
@@ -278,21 +326,22 @@ async function createCustomer(
   }
 
   if (existingByName.length > 0) {
-    if (matchByNameOnly && normalizedEmail) {
-      await connection.execute(
-        `UPDATE customers
-         SET email = ?
-         WHERE customer_id = ?`,
-        [normalizedEmail, existingByName[0].customer_id]
-      );
+    if (
+      requirePhone &&
+      !normalizedPhone &&
+      !String(existingByName[0].phone || "").trim()
+    ) {
+      throw new Error("Customer phone is required.");
     }
+
+    await updateCustomerDetails(existingByName[0].customer_id);
     return existingByName[0].customer_id;
   }
 
   // Reuse an existing customer with the same email.
   if (!matchByNameOnly && normalizedEmail) {
     const [existing] = await connection.execute(
-      `SELECT customer_id
+      `SELECT customer_id, phone
        FROM customers
        WHERE LOWER(TRIM(email)) = ?
        LIMIT 1`,
@@ -300,8 +349,20 @@ async function createCustomer(
     );
 
     if (existing.length > 0) {
+      if (
+        requirePhone &&
+        !normalizedPhone &&
+        !String(existing[0].phone || "").trim()
+      ) {
+        throw new Error("Customer phone is required.");
+      }
+
       return existing[0].customer_id;
     }
+  }
+
+  if (requirePhone && !normalizedPhone) {
+    throw new Error("Customer phone is required.");
   }
 
   // If there is no email, check phone number.
@@ -357,7 +418,16 @@ async function getCustomerOverview(requestedPeriod = "1w", createdBy) {
   if (!period) {
     throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
   }
-  const customerPeriod = getPeriodCondition("c.created_at", period);
+  const customerPeriod = `(
+    ${getPeriodCondition("c.created_at", period)}
+    OR EXISTS (
+      SELECT 1
+      FROM quotations q_period
+      WHERE q_period.customer_id = c.customer_id
+        AND ${getPeriodCondition("q_period.quotation_date", period)}
+        ${createdBy == null ? "" : "AND q_period.created_by = ?"}
+    )
+  )`;
   const quotationPeriod = getPeriodCondition("quotation_date", period);
   const quotationOwnerCondition =
     createdBy == null ? "" : "AND created_by = ?";
@@ -386,7 +456,9 @@ async function getCustomerOverview(requestedPeriod = "1w", createdBy) {
      FROM customers c
     WHERE ${customerPeriod}
       ${customerOwnerCondition}`,
-    createdBy == null ? [] : [createdBy, createdBy, createdBy]
+    createdBy == null
+      ? []
+      : [createdBy, createdBy, createdBy, createdBy]
   );
 
   const [[quotationSummary]] = await db.execute(
