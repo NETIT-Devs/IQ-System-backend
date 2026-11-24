@@ -102,6 +102,91 @@ async function deleteAdmin(userId) {
   return result.affectedRows;
 }
 
+async function transferSuperAdminAccess(currentSuperAdminId, targetAdminId) {
+  const connection = await db.getConnection();
+  let transactionStarted = false;
+
+  try {
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    const [users] = await connection.execute(
+      `SELECT user_id, full_name, email, role, is_active
+       FROM users
+       WHERE user_id IN (?, ?)
+       ORDER BY user_id
+       FOR UPDATE`,
+      [currentSuperAdminId, targetAdminId]
+    );
+    const currentSuperAdmin = users.find(
+      (user) => Number(user.user_id) === Number(currentSuperAdminId)
+    );
+    const targetAdmin = users.find(
+      (user) => Number(user.user_id) === Number(targetAdminId)
+    );
+
+    if (
+      !currentSuperAdmin ||
+      currentSuperAdmin.role !== "Super Admin" ||
+      !currentSuperAdmin.is_active
+    ) {
+      const error = new Error("The current Super Admin account is not active.");
+      error.code = "CURRENT_SUPER_ADMIN_INVALID";
+      throw error;
+    }
+
+    if (!targetAdmin || targetAdmin.role !== "Admin" || !targetAdmin.is_active) {
+      const error = new Error("The selected account must be an active Admin.");
+      error.code = "TARGET_ADMIN_INVALID";
+      throw error;
+    }
+
+    await connection.execute(
+      `UPDATE users
+       SET role = 'Super Admin', updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = ? AND role = 'Admin' AND is_active = 1`,
+      [targetAdminId]
+    );
+    await connection.execute(
+      `UPDATE users
+       SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = ? AND role = 'Super Admin' AND is_active = 1`,
+      [currentSuperAdminId]
+    );
+
+    await connection.execute(
+      `INSERT INTO audit_logs
+        (user_id, user_name, user_role, action, record_id, details)
+       VALUES (?, ?, 'Super Admin', ?, ?, ?)`,
+      [
+        currentSuperAdminId,
+        currentSuperAdmin.full_name || currentSuperAdmin.email,
+        "Super Admin Access Transferred",
+        targetAdminId,
+        `Transferred Super Admin access to ${targetAdmin.full_name || targetAdmin.email} (User ID ${targetAdminId}); previous account deactivated.`,
+      ]
+    );
+
+    await connection.commit();
+    transactionStarted = false;
+
+    return {
+      user_id: Number(targetAdmin.user_id),
+      full_name: targetAdmin.full_name,
+      email: targetAdmin.email,
+      role: "Super Admin",
+      is_active: true,
+    };
+  } catch (error) {
+    if (transactionStarted) {
+      await connection.rollback();
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 module.exports = {
   findUserByEmail,
   createUser,
@@ -110,4 +195,5 @@ module.exports = {
   updateAdmin,
   toggleAdminStatus,
   deleteAdmin,
+  transferSuperAdminAccess,
 };

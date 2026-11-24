@@ -738,19 +738,13 @@ async function getInvoice(req, res) {
 
 // Validate and create a manual or quotation-based invoice.
 async function addInvoice(req, res) {
-  const invoice = req.body || {};
-  const quotationId = Number(invoice.quotation_id);
+  const invoice = { ...(req.body || {}) };
   if (
-    invoice.quotation_id === undefined ||
     invoice.quotation_id === null ||
-    String(invoice.quotation_id).trim() === "" ||
-    !Number.isInteger(quotationId) ||
-    quotationId <= 0
+    (typeof invoice.quotation_id === "string" &&
+      invoice.quotation_id.trim() === "")
   ) {
-    return res.status(400).json({
-      success: false,
-      message: "An approved quotation is required to create an invoice.",
-    });
+    invoice.quotation_id = null;
   }
 
   const items = invoice.items;
@@ -804,8 +798,8 @@ async function addInvoice(req, res) {
   } catch (error) {
     console.error("Create invoice error:", error);
 
-    if (error.code === "QUOTATION_REQUIRED") {
-      return res.status(400).json({
+    if (error.code === "CUSTOMER_IDENTITY_CONFLICT") {
+      return res.status(409).json({
         success: false,
         message: error.message,
       });
@@ -963,6 +957,13 @@ async function editInvoice(req, res) {
     });
   } catch (error) {
     console.error("Update invoice error:", error);
+
+    if (error.code === "CUSTOMER_IDENTITY_CONFLICT") {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
 
     if (
       error.message === "Customer name is required." ||

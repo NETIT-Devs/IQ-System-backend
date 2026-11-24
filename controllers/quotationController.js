@@ -122,6 +122,8 @@ function validateQuotationData(body) {
     terms_and_conditions,
     advance_payment_amount,
     advance_payment,
+    copy_from_quotation_id,
+    duplicate_from_quotation_id,
     items,
     status,
     approval_status,
@@ -135,6 +137,21 @@ function validateQuotationData(body) {
     !quotation_number.trim()
   ) {
     errors.push("Quotation number is required.");
+  }
+
+  if (
+    (copy_from_quotation_id !== undefined &&
+      copy_from_quotation_id !== null &&
+      copy_from_quotation_id !== "" &&
+      (!Number.isInteger(Number(copy_from_quotation_id)) ||
+        Number(copy_from_quotation_id) <= 0)) ||
+    (duplicate_from_quotation_id !== undefined &&
+      duplicate_from_quotation_id !== null &&
+      duplicate_from_quotation_id !== "" &&
+      (!Number.isInteger(Number(duplicate_from_quotation_id)) ||
+        Number(duplicate_from_quotation_id) <= 0))
+  ) {
+    errors.push("Invalid copy source quotation ID.");
   }
 
   let normalizedCustomerId = null;
@@ -180,7 +197,8 @@ function validateQuotationData(body) {
     errors.push("Customer phone must be a string.");
   } else if (
     (typeof phone !== "string" || !phone.trim()) &&
-    !normalizedCustomerId
+    !normalizedCustomerId &&
+    !(typeof email === "string" && email.trim())
   ) {
     errors.push("Customer phone is required.");
   }
@@ -279,11 +297,33 @@ function validateQuotationData(body) {
   if (Array.isArray(items)) {
     items.forEach((item, index) => {
       const itemName = String(item?.item_name || "").trim();
-      const unitPrice = Number(item?.unit_price);
+      const rawUnitPrice = item?.unit_price ?? item?.price;
+      const rawPriceText =
+        item?.price_text ??
+        item?.unit_price_text ??
+        item?.price_label ??
+        null;
+      const numericText = String(rawUnitPrice ?? "").trim();
+      const priceText =
+        typeof rawPriceText === "string" && rawPriceText.trim()
+          ? rawPriceText.trim()
+          : numericText && !Number.isFinite(Number(numericText))
+            ? numericText
+            : null;
+      const unitPrice =
+        priceText && !Number.isFinite(Number(numericText))
+          ? 0
+          : Number(numericText);
       const taxRate = Number(item?.tax_rate ?? 0);
 
       if (!itemName) {
         errors.push(`Item ${index + 1}: Select Service is required.`);
+      }
+
+      if (priceText && priceText.length > 500) {
+        errors.push(
+          `Item ${index + 1}: price text must be 500 characters or fewer.`
+        );
       }
 
       if (!Number.isFinite(unitPrice) || unitPrice < 0) {
@@ -323,6 +363,7 @@ function validateQuotationData(body) {
           website_type: item.website_type || null,
           hosting_domain: item.hosting_domain || null,
           unit_price: Number(unitPrice.toFixed(2)),
+          price_text: priceText,
           tax_rate: Number(taxRate.toFixed(2)),
           line_total: lineTotal,
         });
@@ -403,6 +444,18 @@ function validateQuotationData(body) {
       tax_amount: totalTax,
       total_amount: total,
       advance_payment_amount: Number(advancePaymentAmount.toFixed(2)),
+      copy_from_quotation_id:
+        copy_from_quotation_id !== undefined &&
+        copy_from_quotation_id !== null &&
+        copy_from_quotation_id !== ""
+          ? Number(copy_from_quotation_id)
+          : null,
+      duplicate_from_quotation_id:
+        duplicate_from_quotation_id !== undefined &&
+        duplicate_from_quotation_id !== null &&
+        duplicate_from_quotation_id !== ""
+          ? Number(duplicate_from_quotation_id)
+          : null,
       status:
         status === "Pending Approval" ? "Sent" : status || "Draft",
       approval_status: approval_status || "Not Required",
@@ -722,6 +775,13 @@ async function addQuotation(req, res) {
   } catch (error) {
     console.error("Create quotation error:", error);
 
+    if (error.code === "CUSTOMER_IDENTITY_CONFLICT") {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
         success: false,
@@ -750,6 +810,120 @@ async function addQuotation(req, res) {
     return res.status(500).json({
       success: false,
       message: "Failed to create quotation.",
+    });
+  }
+}
+
+// --------------------------------------------------
+// Copy quotation as a new customer-backed quotation
+// --------------------------------------------------
+
+async function copyQuotation(req, res) {
+  const quotationId = Number(req.params.id);
+  if (!Number.isInteger(quotationId) || quotationId <= 0) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid quotation ID.",
+    });
+  }
+
+  try {
+    const source = await getQuotationById(
+      quotationId,
+      getQuotationOwnerId(req)
+    );
+    if (!source) {
+      return res.status(404).json({
+        success: false,
+        message: "Quotation not found.",
+      });
+    }
+
+    const body = req.body || {};
+    const copyData = {
+      ...source,
+      ...body,
+      customer_name:
+        body.customer_name ?? source.customer_name ?? source.clientName ?? null,
+      company_name:
+        body.company_name ??
+        source.company_name ??
+        source.customer_company ??
+        null,
+      email: body.email ?? source.email ?? source.customer_email ?? null,
+      phone: body.phone ?? source.phone ?? source.customer_phone ?? null,
+      address: body.address ?? source.address ?? source.customer_address ?? null,
+      city: body.city ?? null,
+      country: body.country ?? null,
+      tax_number: body.tax_number ?? null,
+      customer_notes: body.customer_notes ?? source.notes ?? null,
+      quotation_number:
+        body.quotation_number ||
+        `${source.quotation_number || `QUO-${quotationId}`}-COPY`,
+      quotation_date: body.quotation_date || source.quotation_date,
+      items: body.items || source.items,
+      status: body.status || "Draft",
+      approval_status: "Not Required",
+      copy_from_quotation_id: quotationId,
+      duplicate_from_quotation_id: quotationId,
+      customer_id: null,
+      advance_payment_amount:
+        body.advance_payment_amount ?? body.advance_payment ?? 0,
+    };
+
+    const result = validateQuotationData(copyData);
+    if (!result.valid) {
+      return sendValidationErrors(res, result.errors);
+    }
+
+    result.data.approval_status = "Not Required";
+    result.data.status = "Draft";
+    result.data.copy_from_quotation_id = quotationId;
+
+    const newQuotationId = await createQuotationWithItems(
+      {
+        ...result.data,
+        created_by: req.user.user_id,
+      },
+      result.items,
+      {
+        advancePaymentStatus:
+          req.user.role === "Admin" ? "Pending" : "Verified",
+      }
+    );
+
+    await createAuditLog({
+      userId: req.user.user_id,
+      userRole: req.user.role,
+      action: "Quotation Copied",
+      recordId: newQuotationId,
+      details: `Copied quotation ${source.quotation_number} as ${result.data.quotation_number}.`,
+    });
+
+    const copied = await getQuotationById(newQuotationId);
+    return res.status(201).json({
+      success: true,
+      message: "Quotation copied successfully as a new customer record.",
+      quotation_id: newQuotationId,
+      quotation: copied,
+    });
+  } catch (error) {
+    console.error("Copy quotation error:", error);
+    if (error.code === "CUSTOMER_IDENTITY_CONFLICT") {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
+    if (error.code === "INVALID_ADVANCE_PAYMENT") {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      message: "Failed to copy quotation.",
     });
   }
 }
@@ -810,9 +984,19 @@ async function updateQuotation(req, res) {
 
     const updated = await updateQuotationWithItems(
       quotationId,
-      result.data,
+      {
+        ...result.data,
+        created_by: existing.created_by,
+        advance_payment_supplied:
+          req.body?.advance_payment_amount !== undefined ||
+          req.body?.advance_payment !== undefined,
+      },
       result.items,
-      ownerId
+      ownerId,
+      {
+        advancePaymentStatus:
+          req.user.role === "Admin" ? "Pending" : "Verified",
+      }
     );
 
     if (!updated) {
@@ -836,6 +1020,7 @@ async function updateQuotation(req, res) {
       quotation_id: quotationId,
       status: result.data.status,
       approval_status: result.data.approval_status,
+      quotation: updated,
       totals: {
         subtotal: result.data.subtotal,
         discount_amount: result.data.discount_amount,
@@ -845,6 +1030,13 @@ async function updateQuotation(req, res) {
     });
   } catch (error) {
     console.error("Update quotation error:", error);
+
+    if (error.code === "CUSTOMER_IDENTITY_CONFLICT") {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
 
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
@@ -1381,6 +1573,7 @@ module.exports = {
   getQuotation,
   getQuotationPdf,
   addQuotation,
+  copyQuotation,
   updateQuotation,
   deleteQuotation,
   submitQuotationForApproval,

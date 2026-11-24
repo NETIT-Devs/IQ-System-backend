@@ -120,10 +120,13 @@ async function getAllQuotations(filters = {}) {
       q.quotation_number,
       q.customer_id,
       c.customer_name,
+      c.company_name AS company_name,
       c.company_name AS customer_company,
       c.email AS email,
       c.email AS customer_email,
+      c.phone AS phone,
       c.phone AS customer_phone,
+      c.address AS address,
       c.address AS customer_address,
       q.created_by,
       q.quotation_date,
@@ -138,6 +141,8 @@ async function getAllQuotations(filters = {}) {
       q.tax_amount,
       q.total_amount,
       COALESCE(payment_totals.verified_amount, 0) AS amount_paid,
+      COALESCE(payment_totals.verified_amount, 0)
+        + COALESCE(payment_totals.pending_amount, 0) AS advance_payment_amount,
       GREATEST(
         q.total_amount
           - COALESCE(payment_totals.verified_amount, 0)
@@ -200,6 +205,8 @@ async function getAllQuotations(filters = {}) {
         website_type,
         hosting_domain,
         Price AS unit_price,
+        price_text,
+        price_text AS unit_price_text,
         tax_rate,
         line_total,
         created_at
@@ -231,10 +238,13 @@ async function getQuotationById(quotationId, createdBy) {
       q.quotation_number,
       q.customer_id,
       c.customer_name,
+      c.company_name AS company_name,
       c.company_name AS customer_company,
       c.email AS email,
       c.email AS customer_email,
+      c.phone AS phone,
       c.phone AS customer_phone,
+      c.address AS address,
       c.address AS customer_address,
       q.created_by,
       q.quotation_date,
@@ -249,6 +259,8 @@ async function getQuotationById(quotationId, createdBy) {
       q.tax_amount,
       q.total_amount,
       COALESCE(payment_totals.verified_amount, 0) AS amount_paid,
+      COALESCE(payment_totals.verified_amount, 0)
+        + COALESCE(payment_totals.pending_amount, 0) AS advance_payment_amount,
       GREATEST(
         q.total_amount
           - COALESCE(payment_totals.verified_amount, 0)
@@ -316,6 +328,8 @@ async function getQuotationById(quotationId, createdBy) {
       website_type,
       hosting_domain,
       Price AS unit_price,
+      price_text,
+      price_text AS unit_price_text,
       tax_rate,
       line_total,
       created_at
@@ -370,7 +384,12 @@ async function createQuotationWithItems(
         created_by: quotation.created_by,
       },
       connection,
-      { matchByNameOnly: true, requirePhone: true }
+      {
+        requirePhone: true,
+        forceNewCustomer:
+          Boolean(quotation.copy_from_quotation_id) ||
+          Boolean(quotation.duplicate_from_quotation_id),
+      }
     );
 
     const [result] = await connection.execute(
@@ -467,9 +486,10 @@ async function createQuotationWithItems(
           website_type,
           hosting_domain,
           Price,
+          price_text,
           tax_rate,
           line_total
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           quotationId,
           item.item_name.trim(),
@@ -478,6 +498,7 @@ async function createQuotationWithItems(
           item.website_type?.trim() || null,
           item.hosting_domain?.trim() || null,
           unitPrice.toFixed(2),
+          item.price_text?.trim() || null,
           taxRate.toFixed(2),
           lineTotal.toFixed(2),
         ]
@@ -500,7 +521,8 @@ async function updateQuotationWithItems(
   quotationId,
   quotation,
   items,
-  createdBy
+  createdBy,
+  { advancePaymentStatus = "Pending" } = {}
 ) {
   const connection = await db.getConnection();
 
@@ -541,7 +563,7 @@ async function updateQuotationWithItems(
         created_by: quotation.created_by,
       },
       connection,
-      { matchByNameOnly: true, requirePhone: true }
+      { requirePhone: true }
     );
 
     await connection.execute(
@@ -586,6 +608,94 @@ async function updateQuotationWithItems(
       ]
     );
 
+    if (quotation.advance_payment_supplied) {
+      const advancePaymentAmount = Number(
+        quotation.advance_payment_amount ?? 0
+      );
+      if (
+        !Number.isFinite(advancePaymentAmount) ||
+        advancePaymentAmount < 0 ||
+        advancePaymentAmount > Number(quotation.total_amount)
+      ) {
+        throw new Error("Invalid advance payment amount.");
+      }
+
+      const [advancePayments] = await connection.execute(
+        `SELECT payment_id, payment_status
+         FROM payments
+         WHERE quotation_id = ?
+           AND invoice_id IS NULL
+           AND payment_type IN ('Advance', 'Full Payment')
+         ORDER BY payment_id ASC
+         LIMIT 1
+         FOR UPDATE`,
+        [quotationId]
+      );
+
+      if (advancePaymentAmount === 0) {
+        await connection.execute(
+          `DELETE FROM payments
+           WHERE quotation_id = ?
+             AND invoice_id IS NULL
+             AND payment_type IN ('Advance', 'Full Payment')`,
+          [quotationId]
+        );
+      } else if (advancePayments.length > 0) {
+        await connection.execute(
+          `UPDATE payments
+           SET amount = ?,
+               payment_type = ?,
+               payment_status = ?,
+               verified_by = CASE WHEN ? = 'Verified' THEN COALESCE(verified_by, ?) ELSE NULL END,
+               verified_at = CASE WHEN ? = 'Verified' THEN COALESCE(verified_at, NOW()) ELSE NULL END
+           WHERE payment_id = ?`,
+          [
+            advancePaymentAmount,
+            advancePaymentAmount >= Number(quotation.total_amount)
+              ? "Full Payment"
+              : "Advance",
+            advancePayments[0].payment_status,
+            advancePayments[0].payment_status,
+            quotation.created_by,
+            advancePayments[0].payment_status,
+            advancePayments[0].payment_id,
+          ]
+        );
+      } else {
+        await connection.execute(
+          `INSERT INTO payments (
+             invoice_id,
+             quotation_id,
+             received_by,
+             payment_date,
+             amount,
+             payment_method,
+             notes,
+             payment_type,
+             payment_status,
+             verified_by,
+             verified_at
+           ) VALUES (
+             NULL, ?, ?, ?, ?, 'Other',
+             'Advance payment entered while editing quotation',
+             ?, ?, ?, CASE WHEN ? = 'Verified' THEN NOW() ELSE NULL END
+           )`,
+          [
+            quotationId,
+            quotation.created_by,
+            quotation.quotation_date,
+            advancePaymentAmount,
+            advancePaymentAmount >= Number(quotation.total_amount)
+              ? "Full Payment"
+              : "Advance",
+            advancePaymentStatus,
+            advancePaymentStatus === "Verified" ? quotation.created_by : null,
+            advancePaymentStatus,
+          ]
+        );
+      }
+    }
+
     await connection.execute(
       `DELETE FROM quotation_items
        WHERE quotation_id = ?`,
@@ -608,9 +718,10 @@ async function updateQuotationWithItems(
           website_type,
           hosting_domain,
           Price,
+          price_text,
           tax_rate,
           line_total
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           quotationId,
           item.item_name.trim(),
@@ -619,6 +730,7 @@ async function updateQuotationWithItems(
           item.website_type?.trim() || null,
           item.hosting_domain?.trim() || null,
           unitPrice.toFixed(2),
+          item.price_text?.trim() || null,
           taxRate.toFixed(2),
           lineTotal.toFixed(2),
         ]
@@ -627,7 +739,7 @@ async function updateQuotationWithItems(
 
     await connection.commit();
 
-    return true;
+    return getQuotationById(quotationId, createdBy);
   } catch (error) {
     await connection.rollback();
     throw error;

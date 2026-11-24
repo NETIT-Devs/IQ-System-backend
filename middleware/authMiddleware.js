@@ -1,8 +1,11 @@
 
 const jwt = require("jsonwebtoken");
+const db = require("../config/db");
 
 // Verify JWT and authenticate Admin / Super Admin users
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
+  let decoded;
+
   try {
     const authHeader = req.headers.authorization;
 
@@ -31,7 +34,7 @@ function authMiddleware(req, res, next) {
       });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     if (
       !decoded ||
@@ -43,13 +46,6 @@ function authMiddleware(req, res, next) {
         message: "Access denied.",
       });
     }
-
-    req.user = {
-      user_id: decoded.user_id,
-      role: decoded.role,
-    };
-
-    return next();
   } catch (error) {
     if (error.name === "TokenExpiredError") {
       return res.status(401).json({
@@ -61,6 +57,44 @@ function authMiddleware(req, res, next) {
     return res.status(401).json({
       success: false,
       message: "Invalid authentication token.",
+    });
+  }
+
+  try {
+    const [rows] = await db.execute(
+      `SELECT user_id, role, is_active
+       FROM users
+       WHERE user_id = ?
+       LIMIT 1`,
+      [decoded.user_id]
+    );
+    const user = rows[0];
+
+    if (!user || Number(user.is_active) !== 1) {
+      return res.status(401).json({
+        success: false,
+        message: "User account is inactive or no longer exists.",
+      });
+    }
+
+    if (!["Admin", "Super Admin"].includes(user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied.",
+      });
+    }
+
+    req.user = {
+      user_id: user.user_id,
+      role: user.role,
+    };
+
+    return next();
+  } catch (error) {
+    console.error("Authentication user lookup error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to verify the user account.",
     });
   }
 }

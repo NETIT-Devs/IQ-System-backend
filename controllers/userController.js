@@ -8,6 +8,7 @@ const {
   updateAdmin,
   toggleAdminStatus,
   deleteAdmin,
+  transferSuperAdminAccess,
 } = require("../models/userModel");
 const { createAuditLog } = require("../models/auditLogModel");
 const { normalizePeriod } = require("../utils/periodFilter");
@@ -336,10 +337,69 @@ async function removeAdmin(req, res) {
   }
 }
 
+async function handoffSuperAdminAccess(req, res) {
+  const targetAdminId = Number(req.params.id);
+  const currentSuperAdminId = Number(req.user?.user_id);
+
+  if (!Number.isInteger(targetAdminId) || targetAdminId <= 0) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid target Admin user ID.",
+    });
+  }
+
+  if (
+    !Number.isInteger(currentSuperAdminId) ||
+    currentSuperAdminId <= 0 ||
+    targetAdminId === currentSuperAdminId
+  ) {
+    return res.status(400).json({
+      success: false,
+      message: "Choose a different Admin account for the transfer.",
+    });
+  }
+
+  try {
+    const newSuperAdmin = await transferSuperAdminAccess(
+      currentSuperAdminId,
+      targetAdminId
+    );
+
+    return res.status(200).json({
+      success: true,
+      message:
+        "Super Admin access transferred. The previous account has been deactivated.",
+      user: newSuperAdmin,
+      history_preserved: true,
+    });
+  } catch (error) {
+    if (error.code === "CURRENT_SUPER_ADMIN_INVALID") {
+      return res.status(403).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    if (error.code === "TARGET_ADMIN_INVALID") {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    console.error("Transfer Super Admin access error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to transfer Super Admin access.",
+    });
+  }
+}
+
 module.exports = {
   listUsers,
   createAdmin,
   updateAdminAccount,
   toggleAdminAccountStatus,
   removeAdmin,
+  handoffSuperAdminAccess,
 };

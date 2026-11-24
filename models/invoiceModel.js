@@ -204,6 +204,8 @@ async function addInvoiceItems(
          description,
          price,
          price AS unit_price,
+         price_text,
+         price_text AS unit_price_text,
          tax_rate,
          line_total
        FROM invoice_items
@@ -562,6 +564,8 @@ async function getQuotationInvoiceData(connection, quotationId) {
        item_name,
        description,
        Price AS unit_price,
+       price_text,
+       price_text AS unit_price_text,
        tax_rate,
        line_total
      FROM quotation_items
@@ -585,21 +589,6 @@ async function createInvoice(
   items = [],
   { returnDetails = false, approvalStatus = "Not Required" } = {}
 ) {
-  const quotationId = Number(invoice?.quotation_id);
-  if (
-    invoice?.quotation_id === undefined ||
-    invoice?.quotation_id === null ||
-    String(invoice.quotation_id).trim() === "" ||
-    !Number.isInteger(quotationId) ||
-    quotationId <= 0
-  ) {
-    const error = new Error(
-      "An approved quotation is required to create an invoice."
-    );
-    error.code = "QUOTATION_REQUIRED";
-    throw error;
-  }
-
   const connection = await db.getConnection();
   let invoiceNumberLock;
 
@@ -725,14 +714,16 @@ async function createInvoice(
            item_name,
            description,
            price,
+           price_text,
            tax_rate,
            line_total
-         ) VALUES (?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           invoiceId,
           item.item_name.trim(),
           item.description?.trim() || null,
           item.unit_price,
+          item.price_text?.trim() || item.unit_price_text?.trim() || null,
           item.tax_rate,
           item.line_total,
         ]
@@ -850,14 +841,16 @@ async function updateInvoice(invoiceId, invoice, items, createdBy) {
            item_name,
            description,
            price,
+           price_text,
            tax_rate,
            line_total
-         ) VALUES (?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           invoiceId,
           item.item_name.trim(),
           item.description?.trim() || null,
           item.unit_price,
+          item.price_text?.trim() || item.unit_price_text?.trim() || null,
           item.tax_rate,
           item.line_total,
         ]

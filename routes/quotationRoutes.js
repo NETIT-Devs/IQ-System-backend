@@ -13,6 +13,7 @@ const {
   submitQuotationForApproval,
   approveQuotation,
   rejectQuotation,
+  copyQuotation,
 } = require("../controllers/quotationController");
 
 const authMiddleware = require("../middleware/authMiddleware");
@@ -52,6 +53,9 @@ router.post("/:id/approve", approveQuotation);
 
 // Reject a pending quotation (Super Admin only)
 router.post("/:id/reject", rejectQuotation);
+
+// Create a new customer-backed copy of an existing quotation.
+router.post("/:id/copy", copyQuotation);
 
 // Update quotation status (Draft or Sent)
 router.patch("/:id/status", updateQuotationStatus);

@@ -169,10 +169,10 @@ async function createCustomer(
   customer,
   connection = db,
   {
-    matchByNameOnly = false,
     rejectExisting = false,
     claimSuperAdminCustomer = false,
     requirePhone = false,
+    forceNewCustomer = false,
   } = {}
 ) {
   const {
@@ -192,6 +192,45 @@ async function createCustomer(
   const name = String(customer_name || "").trim();
   const normalizedEmail = String(email || "").trim().toLowerCase();
   const normalizedPhone = String(phone || "").trim();
+  if (forceNewCustomer) {
+    if (!name) {
+      throw new Error("Customer name is required.");
+    }
+    if (requirePhone && !normalizedPhone) {
+      throw new Error("Customer phone is required.");
+    }
+
+    const [result] = await connection.execute(
+      `INSERT INTO customers
+        (
+          customer_name,
+          company_name,
+          email,
+          phone,
+          address,
+          city,
+          country,
+          tax_number,
+          notes,
+          created_by
+        )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        name,
+        company_name?.trim() || null,
+        normalizedEmail || null,
+        normalizedPhone || null,
+        address?.trim() || null,
+        city?.trim() || null,
+        country?.trim() || null,
+        tax_number?.trim() || null,
+        notes?.trim() || null,
+        created_by || null,
+      ]
+    );
+    return result.insertId;
+  }
+
   const updateCustomerDetails = async (customerId) => {
     await connection.execute(
       `UPDATE customers
@@ -254,27 +293,57 @@ async function createCustomer(
 
   // Reuse a Super Admin customer row when an Admin manually adds that same customer.
   if (rejectExisting) {
-    const identityCondition = normalizedEmail
-      ? "(LOWER(TRIM(COALESCE(c.email, ''))) = ? OR " +
-        "(TRIM(COALESCE(c.email, '')) = '' AND LOWER(TRIM(c.customer_name)) = LOWER(?)))"
-      : "LOWER(TRIM(c.customer_name)) = LOWER(?)";
-    const identityParams = normalizedEmail
-      ? [normalizedEmail, name]
-      : [name];
+    const identityConditions = [];
+    const identityParams = [];
+    const ordering = [];
+    const orderingParams = [];
+
+    if (normalizedEmail) {
+      identityConditions.push(
+        "LOWER(TRIM(COALESCE(c.email, ''))) = ?"
+      );
+      identityParams.push(normalizedEmail);
+      ordering.push(
+        "CASE WHEN LOWER(TRIM(COALESCE(c.email, ''))) = ? THEN 0 ELSE 1 END"
+      );
+      orderingParams.push(normalizedEmail);
+    }
+
+    if (normalizedPhone) {
+      identityConditions.push("TRIM(COALESCE(c.phone, '')) = ?");
+      identityParams.push(normalizedPhone);
+      ordering.push(
+        "CASE WHEN TRIM(COALESCE(c.phone, '')) = ? THEN 0 ELSE 1 END"
+      );
+      orderingParams.push(normalizedPhone);
+    }
+
+    if (identityConditions.length === 0) {
+      identityConditions.push("LOWER(TRIM(c.customer_name)) = LOWER(?)");
+      identityParams.push(name);
+    }
 
     const [existingCustomers] = await connection.execute(
       `SELECT c.customer_id, c.created_by, c.phone, u.role AS created_by_role
        FROM customers c
        LEFT JOIN users u
          ON u.user_id = c.created_by
-       WHERE ${identityCondition}
+       WHERE (${identityConditions.join(" OR ")})
        ORDER BY
-         ${normalizedEmail ? "(LOWER(TRIM(COALESCE(c.email, ''))) = ?) DESC," : ""}
+         ${ordering.length ? `${ordering.join(", ")},` : ""}
          (u.role = 'Super Admin') DESC,
          c.customer_id DESC
-       LIMIT 1`,
-      normalizedEmail ? [...identityParams, normalizedEmail] : identityParams
+       LIMIT 2`,
+      [...identityParams, ...orderingParams]
     );
+
+    if (existingCustomers.length > 1) {
+      const error = new Error(
+        "Customer email and phone match different existing customers."
+      );
+      error.code = "CUSTOMER_IDENTITY_CONFLICT";
+      throw error;
+    }
 
     if (existingCustomers.length > 0) {
       const existingCustomer = existingCustomers[0];
@@ -302,6 +371,7 @@ async function createCustomer(
         );
 
         if (claimResult.affectedRows === 1) {
+          await updateCustomerDetails(existingCustomer.customer_id);
           return existingCustomer.customer_id;
         }
       }
@@ -313,71 +383,75 @@ async function createCustomer(
     }
   }
 
-  // Prefer an existing customer with the same normalized name.
-  let existingByName = [];
-  if (!(rejectExisting && normalizedEmail)) {
-    [existingByName] = await connection.execute(
+  if (normalizedEmail || normalizedPhone) {
+    const identityConditions = [];
+    const identityParams = [];
+
+    if (normalizedEmail) {
+      identityConditions.push(
+        "LOWER(TRIM(COALESCE(email, ''))) = ?"
+      );
+      identityParams.push(normalizedEmail);
+    }
+    if (normalizedPhone) {
+      identityConditions.push("TRIM(COALESCE(phone, '')) = ?");
+      identityParams.push(normalizedPhone);
+    }
+
+    const [existingCustomers] = await connection.execute(
+      `SELECT customer_id, phone
+       FROM customers
+       WHERE ${identityConditions.join(" OR ")}
+       LIMIT 2`,
+      identityParams
+    );
+
+    if (existingCustomers.length > 1) {
+      const error = new Error(
+        "Customer email and phone match different existing customers."
+      );
+      error.code = "CUSTOMER_IDENTITY_CONFLICT";
+      throw error;
+    }
+
+    if (existingCustomers.length === 1) {
+      const existingCustomer = existingCustomers[0];
+      if (
+        requirePhone &&
+        !normalizedPhone &&
+        !String(existingCustomer.phone || "").trim()
+      ) {
+        throw new Error("Customer phone is required.");
+      }
+
+      await updateCustomerDetails(existingCustomer.customer_id);
+      return existingCustomer.customer_id;
+    }
+  } else {
+    const [existingByName] = await connection.execute(
       `SELECT customer_id, phone
        FROM customers
        WHERE LOWER(TRIM(customer_name)) = LOWER(?)
        LIMIT 1`,
       [name]
     );
-  }
 
-  if (existingByName.length > 0) {
-    if (
-      requirePhone &&
-      !normalizedPhone &&
-      !String(existingByName[0].phone || "").trim()
-    ) {
-      throw new Error("Customer phone is required.");
-    }
-
-    await updateCustomerDetails(existingByName[0].customer_id);
-    return existingByName[0].customer_id;
-  }
-
-  // Reuse an existing customer with the same email.
-  if (!matchByNameOnly && normalizedEmail) {
-    const [existing] = await connection.execute(
-      `SELECT customer_id, phone
-       FROM customers
-       WHERE LOWER(TRIM(email)) = ?
-       LIMIT 1`,
-      [normalizedEmail]
-    );
-
-    if (existing.length > 0) {
+    if (existingByName.length > 0) {
       if (
         requirePhone &&
         !normalizedPhone &&
-        !String(existing[0].phone || "").trim()
+        !String(existingByName[0].phone || "").trim()
       ) {
         throw new Error("Customer phone is required.");
       }
 
-      return existing[0].customer_id;
+      await updateCustomerDetails(existingByName[0].customer_id);
+      return existingByName[0].customer_id;
     }
   }
 
   if (requirePhone && !normalizedPhone) {
     throw new Error("Customer phone is required.");
-  }
-
-  // If there is no email, check phone number.
-  if (!matchByNameOnly && !normalizedEmail && normalizedPhone) {
-    const [existing] = await connection.execute(
-      `SELECT customer_id
-       FROM customers
-       WHERE TRIM(phone) = ?
-       LIMIT 1`,
-      [normalizedPhone]
-    );
-
-    if (existing.length > 0) {
-      return existing[0].customer_id;
-    }
   }
 
   const [result] = await connection.execute(

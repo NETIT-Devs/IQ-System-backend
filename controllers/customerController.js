@@ -171,6 +171,13 @@ async function addCustomer(req, res) {
   } catch (error) {
     console.error("Add customer error:", error);
 
+    if (error.code === "CUSTOMER_IDENTITY_CONFLICT") {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
     if (error.code === "CUSTOMER_ALREADY_EXISTS") {
       return res.status(409).json({
         success: false,
