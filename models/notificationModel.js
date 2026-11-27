@@ -38,6 +38,7 @@ async function createNotification({
   );
 }
 
+// Send role-wide notifications only to active accounts.
 async function createNotificationsForRole(role, notification) {
   const [users] = await db.execute(
     `SELECT user_id

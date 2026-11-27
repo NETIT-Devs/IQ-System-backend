@@ -8,7 +8,7 @@ const {
   updateAdmin,
   toggleAdminStatus,
   deleteAdmin,
-  transferSuperAdminAccess,
+  mergeUserAccount,
 } = require("../models/userModel");
 const { createAuditLog } = require("../models/auditLogModel");
 const { normalizePeriod } = require("../utils/periodFilter");
@@ -337,60 +337,81 @@ async function removeAdmin(req, res) {
   }
 }
 
-async function handoffSuperAdminAccess(req, res) {
-  const targetAdminId = Number(req.params.id);
-  const currentSuperAdminId = Number(req.user?.user_id);
-
-  if (!Number.isInteger(targetAdminId) || targetAdminId <= 0) {
-    return res.status(400).json({
-      success: false,
-      message: "Invalid target Admin user ID.",
-    });
-  }
+async function mergeAdminAccount(req, res) {
+  const recipientUserId = Number(req.params.id);
+  const sourceUserId = Number(req.body?.source_user_id);
+  const actorUserId = Number(req.user?.user_id);
+  const password = req.body?.password;
+  const recipientEmail = req.body?.email;
+  const submittedRecipientId = Number(req.body?.target_user_id);
 
   if (
-    !Number.isInteger(currentSuperAdminId) ||
-    currentSuperAdminId <= 0 ||
-    targetAdminId === currentSuperAdminId
+    !Number.isInteger(sourceUserId) ||
+    sourceUserId <= 0 ||
+    !Number.isInteger(recipientUserId) ||
+    recipientUserId <= 0
   ) {
     return res.status(400).json({
       success: false,
-      message: "Choose a different Admin account for the transfer.",
+      message: "Valid source and recipient account IDs are required.",
+    });
+  }
+
+  if (submittedRecipientId !== recipientUserId) {
+    return res.status(400).json({
+      success: false,
+      message: "Recipient account does not match the selected account.",
     });
   }
 
   try {
-    const newSuperAdmin = await transferSuperAdminAccess(
-      currentSuperAdminId,
-      targetAdminId
-    );
+    const result = await mergeUserAccount({
+      sourceUserId,
+      recipientUserId,
+      actorUserId,
+      password,
+      recipientEmail,
+    });
 
     return res.status(200).json({
       success: true,
-      message:
-        "Super Admin access transferred. The previous account has been deactivated.",
-      user: newSuperAdmin,
+      message: `Account data from "${result.source_user.full_name}" was merged into "${result.recipient.full_name}". The source account is now deactivated.`,
+      ...result,
       history_preserved: true,
     });
   } catch (error) {
-    if (error.code === "CURRENT_SUPER_ADMIN_INVALID") {
+    if (
+      error.code === "MERGE_ACTOR_INVALID" ||
+      error.code === "INVALID_SUPER_ADMIN_PASSWORD"
+    ) {
       return res.status(403).json({
         success: false,
         message: error.message,
       });
     }
 
-    if (error.code === "TARGET_ADMIN_INVALID") {
+    if (error.code === "INVALID_MERGE_REQUEST") {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    if (
+      error.code === "SOURCE_ACCOUNT_INVALID" ||
+      error.code === "RECIPIENT_ACCOUNT_INVALID" ||
+      error.code === "RECIPIENT_EMAIL_MISMATCH"
+    ) {
       return res.status(409).json({
         success: false,
         message: error.message,
       });
     }
 
-    console.error("Transfer Super Admin access error:", error);
+    console.error("Merge Admin account error:", error);
     return res.status(500).json({
       success: false,
-      message: "Failed to transfer Super Admin access.",
+      message: "Failed to merge the selected account.",
     });
   }
 }
@@ -401,5 +422,5 @@ module.exports = {
   updateAdminAccount,
   toggleAdminAccountStatus,
   removeAdmin,
-  handoffSuperAdminAccess,
+  mergeAdminAccount,
 };

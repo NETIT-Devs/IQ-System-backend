@@ -6,6 +6,7 @@ const {
   deleteType,
 } = require("../models/quotationTypeModel");
 
+// Handle quotation-type catalog requests; route middleware enforces write permissions.
 async function listTypes(req, res) {
   try {
     const types = await getAllTypes();

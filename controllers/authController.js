@@ -23,7 +23,7 @@ async function login(req, res) {
       });
     }
 
-    const user = await findUserByEmail(email.trim());
+    const user = await findUserByEmail(email.trim().toLowerCase());
 
     if (
       !user ||
@@ -213,7 +213,7 @@ async function forgotPassword(req, res) {
       });
     }
 
-    const user = await findUserByEmail(email.trim());
+    const user = await findUserByEmail(email.trim().toLowerCase());
 
     // Use the same response whether the account exists or not.
     const genericResponse = {
@@ -249,21 +249,58 @@ async function forgotPassword(req, res) {
       .update(rawToken)
       .digest("hex");
 
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    const connection = await db.getConnection();
+    let transactionStarted = false;
+    let deliveryEmail;
 
-    await db.execute(
-      `UPDATE password_reset_tokens
-       SET used_at = CURRENT_TIMESTAMP
-       WHERE user_id = ? AND used_at IS NULL`,
-      [user.user_id]
-    );
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
 
-    await db.execute(
-      `INSERT INTO password_reset_tokens
-       (user_id, token_hash, expires_at)
-       VALUES (?, ?, ?)`,
-      [user.user_id, tokenHash, expiresAt]
-    );
+      const [activeUsers] = await connection.execute(
+        `SELECT user_id, email, role, is_active
+         FROM users
+         WHERE user_id = ?
+         FOR UPDATE`,
+        [user.user_id]
+      );
+      const activeUser = activeUsers[0];
+
+      if (
+        !activeUser ||
+        Number(activeUser.is_active) !== 1 ||
+        !["Admin", "Super Admin"].includes(activeUser.role)
+      ) {
+        await connection.rollback();
+        transactionStarted = false;
+        return res.status(200).json(genericResponse);
+      }
+
+      await connection.execute(
+        `UPDATE password_reset_tokens
+         SET used_at = CURRENT_TIMESTAMP
+         WHERE user_id = ? AND used_at IS NULL`,
+        [activeUser.user_id]
+      );
+
+      await connection.execute(
+        `INSERT INTO password_reset_tokens
+         (user_id, token_hash, expires_at)
+         VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE))`,
+        [activeUser.user_id, tokenHash]
+      );
+
+      await connection.commit();
+      transactionStarted = false;
+      deliveryEmail = activeUser.email;
+    } catch (tokenError) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw tokenError;
+    } finally {
+      connection.release();
+    }
 
     try {
       const transporter = createEmailTransporter();
@@ -273,7 +310,7 @@ async function forgotPassword(req, res) {
 
       await transporter.sendMail({
         from: process.env.EMAIL_USER,
-        to: user.email,
+        to: deliveryEmail,
         subject: "Password Reset Request",
         text:
           `A password reset was requested for your account.\n\n` +
@@ -311,11 +348,10 @@ async function forgotPassword(req, res) {
 
 async function resetPassword(req, res) {
   try {
-    const { token, newPassword, confirmPassword } = req.body;
+    const { token, newPassword, confirmPassword, newEmail } = req.body;
 
     if (
       typeof token !== "string" ||
-      !token ||
       typeof newPassword !== "string" ||
       typeof confirmPassword !== "string" ||
       !newPassword ||
@@ -324,6 +360,13 @@ async function resetPassword(req, res) {
       return res.status(400).json({
         success: false,
         message: "Token and all password fields are required.",
+      });
+    }
+
+    if (!/^[a-f0-9]{64}$/i.test(token)) {
+      return res.status(400).json({
+        success: false,
+        message: "Reset link is invalid or expired.",
       });
     }
 
@@ -341,19 +384,40 @@ async function resetPassword(req, res) {
       });
     }
 
+    if (newEmail !== undefined && newEmail !== null && typeof newEmail !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "A valid email address is required.",
+      });
+    }
+
+    const normalizedNewEmail =
+      typeof newEmail === "string" && newEmail.trim()
+        ? newEmail.trim().toLowerCase()
+        : null;
+
+    if (
+      normalizedNewEmail &&
+      (normalizedNewEmail.length > 254 ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedNewEmail))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid email address is required.",
+      });
+    }
+
     const tokenHash = crypto
       .createHash("sha256")
       .update(token)
       .digest("hex");
 
     const [rows] = await db.execute(
-      `SELECT prt.reset_id, prt.user_id
-       FROM password_reset_tokens AS prt
-       INNER JOIN users AS u ON u.user_id = prt.user_id
-       WHERE prt.token_hash = ?
-         AND prt.used_at IS NULL
-         AND prt.expires_at > NOW()
-         AND u.is_active = 1
+      `SELECT reset_id, user_id
+       FROM password_reset_tokens
+       WHERE token_hash = ?
+         AND used_at IS NULL
+         AND expires_at > NOW()
        LIMIT 1`,
       [tokenHash]
     );
@@ -369,22 +433,64 @@ async function resetPassword(req, res) {
     const newPasswordHash = await bcrypt.hash(newPassword, 12);
 
     const connection = await db.getConnection();
+    let transactionStarted = false;
 
     try {
       await connection.beginTransaction();
+      transactionStarted = true;
+
+      const [activeUsers] = await connection.execute(
+        `SELECT user_id, email
+         FROM users
+         WHERE user_id = ? AND is_active = 1
+         FOR UPDATE`,
+        [resetRecord.user_id]
+      );
+
+      if (!activeUsers.length) {
+        await connection.rollback();
+        transactionStarted = false;
+        return res.status(400).json({
+          success: false,
+          message: "Reset link is invalid or expired.",
+        });
+      }
+
+      if (normalizedNewEmail && normalizedNewEmail !== activeUsers[0].email) {
+        const [existingEmails] = await connection.execute(
+          `SELECT user_id
+           FROM users
+           WHERE email = ? AND user_id <> ?
+           LIMIT 1
+           FOR UPDATE`,
+          [normalizedNewEmail, resetRecord.user_id]
+        );
+
+        if (existingEmails.length) {
+          await connection.rollback();
+          transactionStarted = false;
+          return res.status(409).json({
+            success: false,
+            message: "That email address is already associated with an account.",
+          });
+        }
+      }
 
       const [validRows] = await connection.execute(
         `SELECT reset_id
          FROM password_reset_tokens
          WHERE reset_id = ?
+           AND user_id = ?
+           AND token_hash = ?
            AND used_at IS NULL
            AND expires_at > NOW()
          FOR UPDATE`,
-        [resetRecord.reset_id]
+        [resetRecord.reset_id, resetRecord.user_id, tokenHash]
       );
 
       if (!validRows.length) {
         await connection.rollback();
+        transactionStarted = false;
 
         return res.status(400).json({
           success: false,
@@ -392,23 +498,46 @@ async function resetPassword(req, res) {
         });
       }
 
-      await connection.execute(
+      const [passwordUpdate] = await connection.execute(
         `UPDATE users
-         SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
+         SET email = COALESCE(?, email),
+             password_hash = ?,
+             updated_at = CURRENT_TIMESTAMP
          WHERE user_id = ? AND is_active = 1`,
-        [newPasswordHash, resetRecord.user_id]
+        [normalizedNewEmail, newPasswordHash, resetRecord.user_id]
       );
 
-      await connection.execute(
+      if (passwordUpdate.affectedRows !== 1) {
+        await connection.rollback();
+        transactionStarted = false;
+        return res.status(400).json({
+          success: false,
+          message: "Reset link is invalid or expired.",
+        });
+      }
+
+      const [tokenUpdate] = await connection.execute(
         `UPDATE password_reset_tokens
          SET used_at = CURRENT_TIMESTAMP
          WHERE user_id = ? AND used_at IS NULL`,
         [resetRecord.user_id]
       );
 
+      if (tokenUpdate.affectedRows < 1) {
+        await connection.rollback();
+        transactionStarted = false;
+        return res.status(400).json({
+          success: false,
+          message: "Reset link is invalid or expired.",
+        });
+      }
+
       await connection.commit();
+      transactionStarted = false;
     } catch (transactionError) {
-      await connection.rollback();
+      if (transactionStarted) {
+        await connection.rollback();
+      }
       throw transactionError;
     } finally {
       connection.release();
@@ -417,9 +546,17 @@ async function resetPassword(req, res) {
     return res.status(200).json({
       success: true,
       message: "Password reset successfully. Please log in again.",
+      ...(normalizedNewEmail ? { email: normalizedNewEmail } : {}),
     });
   } catch (error) {
     console.error("Reset password error:", error.message);
+
+    if (error.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({
+        success: false,
+        message: "That email address is already associated with an account.",
+      });
+    }
 
     return res.status(500).json({
       success: false,

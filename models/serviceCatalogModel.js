@@ -1,6 +1,7 @@
 
 const pool = require("../config/db");
 
+// Quotation forms should only offer services that are currently active.
 async function getActiveServices() {
   const [rows] = await pool.query(
     `SELECT

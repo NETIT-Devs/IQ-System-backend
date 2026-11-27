@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
 
+# Keep the password hidden during entry and remove its temporary environment copy afterward.
 $fullName = Read-Host "Super Admin full name"
 $email = (Read-Host "Super Admin email").Trim().ToLower()
 $securePassword = Read-Host "Create password (hidden)" -AsSecureString

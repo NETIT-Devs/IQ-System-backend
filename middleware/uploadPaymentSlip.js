@@ -21,6 +21,7 @@ const allowedTypes = new Map([
   [".png", "image/png"],
 ]);
 
+// Limit uploads by size and require the MIME type to match the filename extension.
 const upload = multer({
   storage,
   limits: {

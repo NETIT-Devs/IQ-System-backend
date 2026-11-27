@@ -1,3 +1,4 @@
+-- Add the configurable PDF footer and initialize existing settings with a default.
 ALTER TABLE company_settings
   ADD COLUMN pdf_footer_note TEXT NULL;
 

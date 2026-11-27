@@ -27,6 +27,7 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
+  // Require matching image extensions and MIME types before accepting an upload.
   const allowedTypes = ["image/png", "image/jpeg"];
   const allowedExtensions = [".png", ".jpg", ".jpeg"];
   const extension = path.extname(file.originalname).toLowerCase();

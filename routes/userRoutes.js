@@ -9,7 +9,7 @@ const {
   updateAdminAccount,
   toggleAdminAccountStatus,
   removeAdmin,
-  handoffSuperAdminAccess,
+  mergeAdminAccount,
 } = require("../controllers/userController");
 
 const router = express.Router();
@@ -28,7 +28,7 @@ router.post(
   "/:id/transfer-super-admin",
   authMiddleware,
   superAdminMiddleware,
-  handoffSuperAdminAccess
+  mergeAdminAccount
 );
 router.delete("/:id", authMiddleware, superAdminMiddleware, removeAdmin);
 

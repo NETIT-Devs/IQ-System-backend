@@ -1,3 +1,4 @@
+-- Store hashed, expiring, single-use password reset tokens.
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
   reset_id INT UNSIGNED NOT NULL AUTO_INCREMENT,
   user_id INT UNSIGNED NOT NULL,

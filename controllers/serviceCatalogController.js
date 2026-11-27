@@ -6,6 +6,7 @@ const {
   deleteService,
 } = require("../models/serviceCatalogModel");
 
+// Only these descriptive fields are accepted from service catalog requests.
 const serviceFields = [
   "description",
   "hosting_domain",

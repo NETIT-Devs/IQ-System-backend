@@ -1,3 +1,4 @@
+-- Add approval state and review details to invoices.
 ALTER TABLE invoices
   ADD COLUMN approval_status ENUM(
     'Not Required',

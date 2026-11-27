@@ -9,6 +9,7 @@ const {
 
 const router = express.Router();
 
+// The controller scopes Admin reports and leaves Super Admin reports global.
 router.use(authMiddleware);
 router.get("/summary", getSummary);
 router.get("/invoices", getInvoices);

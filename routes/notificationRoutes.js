@@ -10,6 +10,7 @@ const {
 
 const router = express.Router();
 
+// Authenticate every notification operation and use the caller's account scope.
 router.use(authMiddleware);
 
 router.get("/", listNotifications);

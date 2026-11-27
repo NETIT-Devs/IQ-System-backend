@@ -2,12 +2,14 @@ const express = require("express");
 
 const {
   getQuotationItemOptions,
+  getNextQuotationNumberPreview,
   getQuotations,
   getQuotation,
   getQuotationPdf,
   addQuotation,
   updateQuotation,
   updateQuotationStatus,
+  updateQuotationWorkCompletion,
   updateCustomerQuotationStatus, // New controller function
   deleteQuotation,
   submitQuotationForApproval,
@@ -32,6 +34,7 @@ router.use(authMiddleware);
 
 // Get quotation item/service options
 router.get("/item-options", getQuotationItemOptions);
+router.get("/next-number", getNextQuotationNumberPreview);
 
 // Manage quotation form service catalog
 router.get("/services", listServices);
@@ -59,6 +62,9 @@ router.post("/:id/copy", copyQuotation);
 
 // Update quotation status (Draft or Sent)
 router.patch("/:id/status", updateQuotationStatus);
+
+// Record work completion for a quotation that has been invoiced.
+router.patch("/:id/work-completion", updateQuotationWorkCompletion);
 
 // Update customer quotation status (Sent, Accepted, Rejected) - New Route
 router.patch("/:id/customer-status", updateCustomerQuotationStatus);

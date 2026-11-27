@@ -1,6 +1,7 @@
 
 const db = require("../config/db");
 
+// Keep shared topics available to all users while retaining creator attribution.
 async function createTopic(topicTitle, topicDescription, createdBy) {
   const [result] = await db.execute(
     `INSERT INTO quotation_topics

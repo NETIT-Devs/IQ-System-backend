@@ -4,6 +4,7 @@ const {
   getAllTopics,
 } = require("../models/quotationTopicModel");
 
+// Topics are shared across users; route middleware restricts who can create them.
 async function addTopic(req, res) {
   try {
     const { topic_title, topic_description } = req.body;

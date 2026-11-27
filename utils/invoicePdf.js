@@ -76,7 +76,20 @@ function createInvoicePdf(invoice, company = {}) {
       .font("Helvetica-Bold")
       .fontSize(24)
       .fillColor("#17365D")
-      .text("INVOICE", 360, 48, { width: rightEdge - 360, align: "right" });
+      .text(company.invoice_pdf_heading || "INVOICE", 360, 48, {
+        width: rightEdge - 360,
+        align: "right",
+      });
+    if (company.invoice_pdf_subheading) {
+      doc
+        .font("Helvetica")
+        .fontSize(9)
+        .fillColor("#4B5563")
+        .text(company.invoice_pdf_subheading, 310, 75, {
+          width: rightEdge - 310,
+          align: "right",
+        });
+    }
 
     doc
       .font("Helvetica")
@@ -321,7 +334,18 @@ function createInvoicePdf(invoice, company = {}) {
       });
     }
 
-    if (invoice.notes || invoice.terms_and_conditions || signaturePath) {
+    const terms =
+      invoice.terms_and_conditions ||
+      company.default_terms_and_conditions ||
+      "";
+    const footerNote = company.invoice_pdf_footer_note || company.pdf_footer_note;
+    if (
+      invoice.notes ||
+      terms ||
+      footerNote ||
+      company.quotation_thank_you_message ||
+      signaturePath
+    ) {
       y += 12;
       if (y > 680) {
         doc.addPage();
@@ -338,7 +362,7 @@ function createInvoicePdf(invoice, company = {}) {
       y = doc.y + 10;
     }
 
-    if (invoice.terms_and_conditions) {
+    if (terms) {
       doc
         .font("Helvetica-Bold")
         .fontSize(10)
@@ -349,8 +373,39 @@ function createInvoicePdf(invoice, company = {}) {
         .font("Helvetica")
         .fontSize(9)
         .fillColor("#1F2937")
-        .text(invoice.terms_and_conditions, 48, y, { width: rightEdge - 48 });
+        .text(terms, 48, y, { width: rightEdge - 48 });
       y = doc.y + 10;
+    }
+
+    for (const [label, value] of [
+      ["", footerNote],
+      [company.quotation_thank_you_title || "Thank You", company.quotation_thank_you_message],
+      ["Prepared By", company.quotation_prepared_by],
+      ["", company.quotation_prepared_by_services],
+      ["", company.quotation_ceo_name],
+      ["", company.quotation_ceo_designation],
+    ]) {
+      if (!label && !value) continue;
+      if (y > 690) {
+        doc.addPage();
+        y = 55;
+      }
+      if (label) {
+        doc
+          .font("Helvetica-Bold")
+          .fontSize(10)
+          .fillColor("#17365D")
+          .text(label, 48, y, { width: rightEdge - 48 });
+        y = doc.y + 4;
+      }
+      if (value) {
+        doc
+          .font("Helvetica")
+          .fontSize(9)
+          .fillColor("#1F2937")
+          .text(String(value), 48, y, { width: rightEdge - 48 });
+        y = doc.y + 6;
+      }
     }
 
     if (signaturePath && y < 700) {

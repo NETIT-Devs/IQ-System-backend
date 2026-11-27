@@ -1,3 +1,4 @@
+// Map accepted period tokens to fixed SQL intervals instead of user-provided SQL.
 const periods = {
   "1w": { amount: 7, unit: "DAY" },
   "1m": { amount: 1, unit: "MONTH" },
@@ -28,13 +29,19 @@ function normalizePeriod(value) {
 
   const normalized = value.trim().toLowerCase();
   const period = periodAliases[normalized] || normalized;
+  if (period === "all") {
+    return "all";
+  }
   return Object.prototype.hasOwnProperty.call(periods, period) ? period : null;
 }
 
 function getPeriodCondition(column, period) {
   const normalized = normalizePeriod(period);
   if (!normalized) {
-    throw new Error("Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.");
+    throw new Error("Invalid period. Allowed: all, 1w, 1m, 3m, 1y, 2y.");
+  }
+  if (normalized === "all") {
+    return "1=1";
   }
 
   const { amount, unit } = periods[normalized];

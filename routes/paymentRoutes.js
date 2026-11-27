@@ -11,6 +11,7 @@ const {
 
 const router = express.Router();
 
+// All payment routes require authentication; review actions are Super Admin-only.
 router.get("/", authMiddleware, getPayments);
 router.post("/", authMiddleware, uploadPaymentSlip, addPayment);
 router.patch(

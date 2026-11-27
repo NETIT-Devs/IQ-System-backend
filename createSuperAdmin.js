@@ -24,6 +24,7 @@ async function main() {
     const fullName = await ask("Super Admin full name: ");
     const email = (await ask("Super Admin email: ")).toLowerCase();
 
+    // Use PowerShell's secure prompt so the password is not echoed in the console.
     const psScript =
       "$secure = Read-Host 'Create password (hidden)' -AsSecureString; " +
       "$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure); " +

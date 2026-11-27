@@ -104,11 +104,11 @@ function calculateInvoiceAmounts(invoice, items) {
   };
 }
 
-// Generate a unique yearly invoice number while holding a MySQL advisory lock.
-async function generateInvoiceNumber(connection, invoiceDate) {
+// Generate a unique annual number for invoices created from quotations.
+async function generateQuotationInvoiceNumber(connection, invoiceDate) {
   const year = invoiceDate.slice(0, 4);
   const prefix = `INV-${year}-`;
-  const lockName = `invoice-number-${year}`;
+  const lockName = `quotation-invoice-number-${year}`;
   const [lockRows] = await connection.execute(
     "SELECT GET_LOCK(?, 10) AS acquired",
     [lockName]
@@ -127,10 +127,57 @@ async function generateInvoiceNumber(connection, invoiceDate) {
          0
        ) AS max_sequence
        FROM invoices
-       WHERE invoice_number LIKE ?`,
+       WHERE quotation_id IS NOT NULL
+         AND invoice_number LIKE ?`,
       [prefix.length + 1, `${prefix}%`]
     );
     const nextSequence = Number(rows[0]?.max_sequence || 0) + 1;
+
+    return {
+      invoiceNumber: `${prefix}${String(nextSequence).padStart(3, "0")}`,
+      lockName,
+    };
+  } catch (error) {
+    await connection.execute("SELECT RELEASE_LOCK(?)", [lockName]);
+    throw error;
+  }
+}
+
+// Generate a monthly number starting at 101 for invoices without quotations.
+async function generateStandaloneInvoiceNumber(connection, invoiceDate) {
+  const dateMatch = /^(\d{4})-(\d{2})/.exec(String(invoiceDate || ""));
+  if (!dateMatch) {
+    const error = new Error("A valid invoice date is required to generate its number.");
+    error.code = "INVALID_INVOICE_DATE";
+    throw error;
+  }
+
+  const yearMonth = `${dateMatch[1].slice(2)}${dateMatch[2]}`;
+  const prefix = `INV-${yearMonth}-`;
+  const lockName = `standalone-invoice-number-${yearMonth}`;
+  const [lockRows] = await connection.execute(
+    "SELECT GET_LOCK(?, 10) AS acquired",
+    [lockName]
+  );
+
+  if (Number(lockRows[0]?.acquired) !== 1) {
+    const error = new Error("Could not reserve an invoice number. Please retry.");
+    error.code = "INVOICE_NUMBER_LOCK_TIMEOUT";
+    throw error;
+  }
+
+  try {
+    const [rows] = await connection.execute(
+      `SELECT COALESCE(
+         MAX(CAST(SUBSTRING(invoice_number, ?) AS UNSIGNED)),
+         100
+       ) AS max_sequence
+       FROM invoices
+       WHERE quotation_id IS NULL
+         AND invoice_number LIKE ?`,
+      [prefix.length + 1, `${prefix}%`]
+    );
+    const nextSequence = Math.max(Number(rows[0]?.max_sequence || 100), 100) + 1;
 
     return {
       invoiceNumber: `${prefix}${String(nextSequence).padStart(3, "0")}`,
@@ -237,6 +284,15 @@ async function addInvoiceItems(
       [invoice.invoice_id]
     );
     invoice.payment_history = payments;
+    const totalCents = Math.round(Number(invoice.total_amount || 0) * 100);
+    const verifiedPaymentCents = Math.round(
+      payments
+        .filter((payment) => payment.payment_status === "Verified")
+        .reduce((total, payment) => total + Number(payment.amount || 0), 0) *
+        100
+    );
+    invoice.is_fully_paid =
+      totalCents > 0 && verifiedPaymentCents >= totalCents;
 
     if (includePendingPaymentTotals) {
       const verifiedAmount = Number(invoice.amount_paid || 0);
@@ -274,9 +330,6 @@ async function getAllInvoices(createdBy, requestedPeriod, search = "") {
   if (createdBy !== undefined && createdBy !== null) {
     conditions.push("i.created_by = ?");
     params.push(createdBy);
-    conditions.push(
-      "i.approval_status IN ('Approved', 'Not Required')"
-    );
   }
   if (String(search).trim()) {
     const searchTerm = `%${String(search).trim()}%`;
@@ -676,9 +729,16 @@ async function createInvoice(
     invoiceData = calculated.invoice;
     invoiceItems = calculated.items;
 
-    // Generate a unique invoice number when the request does not provide one.
-    if (!invoiceData.invoice_number) {
-      const generated = await generateInvoiceNumber(
+    // Number standalone and quotation-linked invoices in separate global sequences.
+    if (!invoiceData.quotation_id) {
+      const generated = await generateStandaloneInvoiceNumber(
+        connection,
+        invoiceData.invoice_date
+      );
+      invoiceNumberLock = generated.lockName;
+      invoiceData.invoice_number = generated.invoiceNumber;
+    } else {
+      const generated = await generateQuotationInvoiceNumber(
         connection,
         invoiceData.invoice_date
       );

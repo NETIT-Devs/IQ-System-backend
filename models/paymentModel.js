@@ -1,6 +1,7 @@
 const db = require("../config/db");
 const { getPeriodCondition, normalizePeriod } = require("../utils/periodFilter");
 
+// Admins see their own submitted payments; Super Admins can review all accounts.
 async function getPayments(
   userId,
   role,
@@ -141,6 +142,7 @@ async function getPayments(
   return rows;
 }
 
+// Scope payments by submitter and outstanding balances by invoice or quotation owner.
 async function getPaymentSummary(userId, role, requestedPeriod) {
   const period = normalizePeriod(requestedPeriod);
   if (!period) {
@@ -236,6 +238,7 @@ async function getPaymentSummary(userId, role, requestedPeriod) {
   };
 }
 
+// Lock the related invoice or quotation so pending submissions reserve its balance.
 async function createPendingPayment(payment) {
   const connection = await db.getConnection();
 
@@ -504,6 +507,7 @@ async function createPendingPayment(payment) {
   }
 }
 
+// Recheck totals while holding row locks before marking a payment as verified.
 async function verifyPayment(paymentId, verifiedBy) {
   const connection = await db.getConnection();
 
@@ -651,6 +655,8 @@ async function verifyPayment(paymentId, verifiedBy) {
         paid_amount: amountPaid,
         balance_due: balanceDue,
         remaining_amount: balanceDue,
+        is_fully_paid:
+          Number(invoice.total_amount) > 0 && balanceDue <= 0,
       };
     }
 
@@ -671,6 +677,7 @@ async function verifyPayment(paymentId, verifiedBy) {
   }
 }
 
+// Only pending payments can be rejected, preserving completed review decisions.
 async function rejectPayment(paymentId, rejectedBy, rejectionReason) {
   const [pendingPayments] = await db.execute(
     `SELECT payment_id, received_by, amount, invoice_id, quotation_id

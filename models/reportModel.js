@@ -1,7 +1,8 @@
 const db = require("../config/db");
 const { getPeriodCondition } = require("../utils/periodFilter");
 
-function buildDateFilter(column, filters, params) {
+// Combine explicit date bounds or a preset period with an optional owner scope.
+function buildDateFilter(column, filters, params, ownerColumn, ownerId) {
   const conditions = [];
 
   if (filters.startDate) {
@@ -18,21 +19,30 @@ function buildDateFilter(column, filters, params) {
     conditions.push(getPeriodCondition(column, filters.period));
   }
 
+  if (ownerColumn && ownerId !== undefined && ownerId !== null) {
+    conditions.push(`${ownerColumn} = ?`);
+    params.push(ownerId);
+  }
+
   return conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 }
 
-async function getReportSummary(filters) {
+async function getReportSummary(filters, ownerId) {
   const invoiceParams = [];
   const invoiceDateFilter = buildDateFilter(
     "invoice_date",
     filters,
-    invoiceParams
+    invoiceParams,
+    "created_by",
+    ownerId
   );
   const quotationParams = [];
   const quotationDateFilter = buildDateFilter(
     "quotation_date",
     filters,
-    quotationParams
+    quotationParams,
+    "created_by",
+    ownerId
   );
 
   const [[invoiceSummary]] = await db.execute(
@@ -64,9 +74,15 @@ async function getReportSummary(filters) {
   };
 }
 
-async function getInvoiceReport(filters) {
+async function getInvoiceReport(filters, ownerId) {
   const params = [];
-  const dateFilter = buildDateFilter("invoice_date", filters, params);
+  const dateFilter = buildDateFilter(
+    "invoice_date",
+    filters,
+    params,
+    "created_by",
+    ownerId
+  );
   const [rows] = await db.execute(
     `SELECT
        invoice_id,
@@ -88,9 +104,15 @@ async function getInvoiceReport(filters) {
   return rows;
 }
 
-async function getQuotationReport(filters) {
+async function getQuotationReport(filters, ownerId) {
   const params = [];
-  const dateFilter = buildDateFilter("quotation_date", filters, params);
+  const dateFilter = buildDateFilter(
+    "quotation_date",
+    filters,
+    params,
+    "created_by",
+    ownerId
+  );
   const [rows] = await db.execute(
     `SELECT
        quotation_id,
@@ -108,7 +130,8 @@ async function getQuotationReport(filters) {
   return rows;
 }
 
-async function getMonthlyIncome(filters) {
+async function getMonthlyIncome(filters, ownerId) {
+  // Support existing payment schemas that use different date-column names.
   const dateCandidates = [
     "payment_date",
     "paid_at",
@@ -135,7 +158,13 @@ async function getMonthlyIncome(filters) {
   }
 
   const params = [];
-  const dateFilter = buildDateFilter(`\`${dateColumn}\``, filters, params);
+  const dateFilter = buildDateFilter(
+    `\`${dateColumn}\``,
+    filters,
+    params,
+    "received_by",
+    ownerId
+  );
 
   const [rows] = await db.execute(
     `SELECT

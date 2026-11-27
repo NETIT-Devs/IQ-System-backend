@@ -73,6 +73,7 @@ async function removeSlip(filePath) {
   }
 }
 
+// Check file signatures after Multer's extension and MIME-type checks.
 async function hasValidFileSignature(file) {
   let contents;
   try {

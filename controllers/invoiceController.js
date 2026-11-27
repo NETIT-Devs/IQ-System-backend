@@ -468,11 +468,14 @@ function validateInvoice(invoice, items, { existingDueDate } = {}) {
 
 // Return the invoices visible to the authenticated user.
 async function getInvoices(req, res) {
-  const period = normalizePeriod(req.query.period);
+  const period =
+    req.query.period === undefined || req.query.period === ""
+      ? "all"
+      : normalizePeriod(req.query.period);
   if (!period) {
     return res.status(400).json({
       success: false,
-      message: "Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.",
+      message: "Invalid period. Allowed: all, 1w, 1m, 3m, 1y, 2y.",
     });
   }
 

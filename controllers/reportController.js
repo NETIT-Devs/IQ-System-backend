@@ -65,12 +65,17 @@ function handleReportError(res, error, reportName) {
   });
 }
 
+// Admin reports stay within the caller's records; Super Admin reports are global.
+function getReportOwnerId(req) {
+  return req.user?.role === "Super Admin" ? undefined : req.user?.user_id;
+}
+
 async function getSummary(req, res) {
   const filters = getDateFilters(req, res);
   if (!filters) return;
 
   try {
-    const data = await getReportSummary(filters);
+    const data = await getReportSummary(filters, getReportOwnerId(req));
     return res.status(200).json({ success: true, data });
   } catch (error) {
     return handleReportError(res, error, "summary");
@@ -82,7 +87,7 @@ async function getInvoices(req, res) {
   if (!filters) return;
 
   try {
-    const data = await getInvoiceReport(filters);
+    const data = await getInvoiceReport(filters, getReportOwnerId(req));
     return res.status(200).json({ success: true, data });
   } catch (error) {
     return handleReportError(res, error, "invoice");
@@ -94,7 +99,7 @@ async function getQuotations(req, res) {
   if (!filters) return;
 
   try {
-    const data = await getQuotationReport(filters);
+    const data = await getQuotationReport(filters, getReportOwnerId(req));
     return res.status(200).json({ success: true, data });
   } catch (error) {
     return handleReportError(res, error, "quotation");
@@ -106,7 +111,7 @@ async function getIncome(req, res) {
   if (!filters) return;
 
   try {
-    const data = await getMonthlyIncome(filters);
+    const data = await getMonthlyIncome(filters, getReportOwnerId(req));
     return res.status(200).json({ success: true, data });
   } catch (error) {
     return handleReportError(res, error, "monthly income");

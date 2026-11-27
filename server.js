@@ -18,6 +18,10 @@ const auditLogRoutes = require("./routes/auditLogRoutes");
 const companySettingsRoutes = require("./routes/companySettingsRoutes");
 const userRoutes = require("./routes/userRoutes");
 const notificationRoutes = require("./routes/notificationRoutes");
+const adminDashboardRoutes = require("./routes/adminDashboardRoutes");
+const superAdminDashboardRoutes = require("./routes/superAdminDashboardRoutes");
+const reportRoutes = require("./routes/reportRoutes");
+const quotationTopicRoutes = require("./routes/quotationTopicRoutes");
 
 const app = express();
 
@@ -61,6 +65,14 @@ app.use("/api/users", userRoutes);
 
 // Notifications API
 app.use("/api/notifications", notificationRoutes);
+
+// Dashboard and reporting APIs
+app.use("/api/admin/dashboard", adminDashboardRoutes);
+app.use("/api/super-admin/dashboard", superAdminDashboardRoutes);
+app.use("/api/reports", reportRoutes);
+
+// Quotation topics API
+app.use("/api/quotation-topics", quotationTopicRoutes);
 
 // 404 - Route not found
 app.use((req, res) => {

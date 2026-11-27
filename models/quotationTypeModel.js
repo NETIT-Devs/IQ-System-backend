@@ -1,6 +1,7 @@
 
 const db = require("../config/db");
 
+// Return catalog entries in the order expected by quotation selectors.
 async function getAllTypes() {
   const [rows] = await db.execute(
     `SELECT type_id, type_name, description, created_by,

@@ -3,8 +3,10 @@ const db = require("../config/db");
 const {
   getAllQuotations,
   getQuotationById,
+  getNextQuotationNumber,
   createQuotationWithItems,
   updateQuotationWithItems,
+  setQuotationWorkCompletion,
   deleteQuotationById,
 } = require("../models/quotationModel");
 
@@ -61,6 +63,35 @@ function isValidDate(value) {
     !Number.isNaN(date.getTime()) &&
     date.toISOString().slice(0, 10) === value
   );
+}
+
+async function getNextQuotationNumberPreview(req, res) {
+  const quotationDate = req.query.date || new Date().toISOString().slice(0, 10);
+  if (!isValidDate(quotationDate)) {
+    return res.status(400).json({
+      success: false,
+      message: "A valid quotation date is required.",
+    });
+  }
+
+  try {
+    const quotationNumber = await getNextQuotationNumber(quotationDate);
+    return res.json({
+      success: true,
+      quotation_number: quotationNumber,
+    });
+  } catch (error) {
+    console.error("Get next quotation number error:", error);
+    return res.status(
+      error.code === "QUOTATION_NUMBER_LOCK_TIMEOUT" ? 503 : 500
+    ).json({
+      success: false,
+      message:
+        error.code === "QUOTATION_NUMBER_LOCK_TIMEOUT"
+          ? error.message
+          : "Failed to generate the next quotation number.",
+    });
+  }
 }
 
 function addProjectDuration(startDate, duration, unit) {
@@ -512,11 +543,14 @@ async function getQuotations(req, res) {
       });
     }
 
-    const period = normalizePeriod(req.query.period);
+    const period =
+      req.query.period === undefined || req.query.period === ""
+        ? "all"
+        : normalizePeriod(req.query.period);
     if (!period) {
       return res.status(400).json({
         success: false,
-        message: "Invalid period. Allowed: 1w, 1m, 3m, 1y, 2y.",
+        message: "Invalid period. Allowed: all, 1w, 1m, 3m, 1y, 2y.",
       });
     }
 
@@ -691,17 +725,19 @@ async function addQuotation(req, res) {
       result.data.approval_status = "Pending";
     }
 
+    const quotationToCreate = {
+      ...result.data,
+      created_by: userId,
+    };
     const quotationId = await createQuotationWithItems(
-      {
-        ...result.data,
-        created_by: userId,
-      },
+      quotationToCreate,
       result.items,
       {
         advancePaymentStatus:
           req.user.role === "Admin" ? "Pending" : "Verified",
       }
     );
+    result.data.quotation_number = quotationToCreate.quotation_number;
     const advancePaymentAmount = Number(
       result.data.advance_payment_amount || 0
     );
@@ -746,6 +782,7 @@ async function addQuotation(req, res) {
       success: true,
       message: "Quotation created successfully.",
       quotation_id: quotationId,
+      quotation_number: result.data.quotation_number,
       status: result.data.status,
       approval_status: result.data.approval_status,
       advance_payment_amount: advancePaymentAmount,
@@ -802,6 +839,13 @@ async function addQuotation(req, res) {
 
     if (error.code === "INVALID_ADVANCE_PAYMENT") {
       return res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    if (error.code === "QUOTATION_NUMBER_LOCK_TIMEOUT") {
+      return res.status(503).json({
         success: false,
         message: error.message,
       });
@@ -880,17 +924,19 @@ async function copyQuotation(req, res) {
     result.data.status = "Draft";
     result.data.copy_from_quotation_id = quotationId;
 
+    const quotationToCreate = {
+      ...result.data,
+      created_by: req.user.user_id,
+    };
     const newQuotationId = await createQuotationWithItems(
-      {
-        ...result.data,
-        created_by: req.user.user_id,
-      },
+      quotationToCreate,
       result.items,
       {
         advancePaymentStatus:
           req.user.role === "Admin" ? "Pending" : "Verified",
       }
     );
+    result.data.quotation_number = quotationToCreate.quotation_number;
 
     await createAuditLog({
       userId: req.user.user_id,
@@ -1405,6 +1451,91 @@ async function rejectQuotation(req, res) {
 // Draft and Sent only.
 // --------------------------------------------------
 
+async function updateQuotationWorkCompletion(req, res) {
+  try {
+    const quotationId = Number(req.params.id);
+    const { completed } = req.body || {};
+
+    if (!Number.isInteger(quotationId) || quotationId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid quotation ID.",
+      });
+    }
+
+    if (typeof completed !== "boolean") {
+      return res.status(400).json({
+        success: false,
+        message: "completed must be a boolean.",
+      });
+    }
+
+    const result = await setQuotationWorkCompletion(
+      quotationId,
+      completed,
+      req.user.user_id,
+      getQuotationOwnerId(req)
+    );
+
+    if (!result.updated && result.reason === "not_found") {
+      return res.status(404).json({
+        success: false,
+        message: "Quotation not found.",
+      });
+    }
+
+    if (!result.updated && result.reason === "invoice_not_created") {
+      return res.status(409).json({
+        success: false,
+        message:
+          "Work can only be marked complete after an invoice has been created from this quotation.",
+      });
+    }
+
+    const quotation = await getQuotationById(
+      quotationId,
+      getQuotationOwnerId(req)
+    );
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: "Quotation not found.",
+      });
+    }
+
+    await createAuditLog({
+      userId: req.user?.user_id,
+      userRole: req.user?.role,
+      action: completed
+        ? "Quotation Work Marked Complete"
+        : "Quotation Work Reopened",
+      recordId: quotationId,
+      details: completed
+        ? `Marked quotation ${quotation.quotation_number} work complete.`
+        : `Reopened work for quotation ${quotation.quotation_number}.`,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: completed
+        ? "Quotation work marked complete."
+        : "Quotation work marked incomplete.",
+      quotation_id: quotationId,
+      work_completed: quotation.work_completed,
+      is_invoiced: quotation.is_invoiced,
+      is_work_completed: quotation.is_work_completed,
+      quotation,
+    });
+  } catch (error) {
+    console.error("Update quotation work completion error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update quotation work completion.",
+    });
+  }
+}
+
 async function updateQuotationStatus(req, res) {
   try {
     const quotationId = Number(req.params.id);
@@ -1569,6 +1700,7 @@ async function updateCustomerQuotationStatus(req, res) {
 
 module.exports = {
   getQuotationItemOptions,
+  getNextQuotationNumberPreview,
   getQuotations,
   getQuotation,
   getQuotationPdf,
@@ -1580,5 +1712,6 @@ module.exports = {
   approveQuotation,
   rejectQuotation,
   updateQuotationStatus,
+  updateQuotationWorkCompletion,
   updateCustomerQuotationStatus, // Exported here
 };

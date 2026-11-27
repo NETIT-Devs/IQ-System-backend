@@ -3,6 +3,7 @@ require("dotenv").config();
 const bcrypt = require("bcryptjs");
 const db = require("./config/db");
 
+// Create the initial Super Admin from temporary values supplied by the wrapper script.
 async function main() {
   try {
     const fullName = process.env.SUPERADMIN_NAME;

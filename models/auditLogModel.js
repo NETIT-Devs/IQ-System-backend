@@ -1,6 +1,7 @@
 const db = require("../config/db");
 const { getPeriodCondition, normalizePeriod } = require("../utils/periodFilter");
 
+// Audit logging is best-effort and must not interrupt the primary operation.
 async function createAuditLog({
   userId = null,
   userName = null,

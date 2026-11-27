@@ -6,6 +6,7 @@ const {
   saveCompanySettings,
 } = require("../models/companySettingsModel");
 
+// Restrict updates to known settings fields instead of accepting arbitrary columns.
 const editableFields = [
   "company_name",
   "company_logo",
@@ -19,8 +20,42 @@ const editableFields = [
   "bank_branch",
   "bank_swift_code",
   "default_terms_and_conditions",
+  "pdf_heading",
+  "pdf_subheading",
+  "pdf_custom_lines",
+  "pdf_custom_sections",
   "pdf_footer_note",
+  "quotation_thank_you_title",
+  "quotation_thank_you_message",
+  "quotation_prepared_by",
+  "quotation_prepared_by_services",
+  "quotation_ceo_name",
+  "quotation_ceo_designation",
 ];
+
+const textFields = editableFields.filter(
+  (field) => field !== "pdf_custom_sections"
+);
+
+function sendCompanySettingsError(res, error, operation) {
+  console.error(`${operation} company settings error:`, error.message);
+
+  if (error.code === "ER_BAD_FIELD_ERROR") {
+    return res.status(503).json({
+      success: false,
+      message:
+        "Company Settings database schema is missing PDF template columns. Apply the 20261118 and 20261124 Company Settings migrations, then retry.",
+    });
+  }
+
+  return res.status(500).json({
+    success: false,
+    message:
+      operation === "Get"
+        ? "Failed to retrieve company settings."
+        : "Failed to save company settings.",
+  });
+}
 
 async function getCompanySettings(req, res) {
   try {
@@ -31,12 +66,7 @@ async function getCompanySettings(req, res) {
       companySettings,
     });
   } catch (error) {
-    console.error("Get company settings error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to retrieve company settings.",
-    });
+    return sendCompanySettingsError(res, error, "Get");
   }
 }
 
@@ -46,6 +76,7 @@ async function updateCompanySettings(req, res) {
     const body = req.body || {};
     const settings = {};
 
+    // Preserve existing values when a request only updates part of the settings.
     for (const field of editableFields) {
       settings[field] =
         body[field] !== undefined
@@ -67,7 +98,7 @@ async function updateCompanySettings(req, res) {
 
     settings.company_name = settings.company_name.trim();
 
-    for (const field of editableFields) {
+    for (const field of textFields) {
       if (
         settings[field] !== null &&
         typeof settings[field] !== "string"
@@ -77,6 +108,53 @@ async function updateCompanySettings(req, res) {
           message: `${field} must be a string or null.`,
         });
       }
+    }
+
+    if (
+      settings.pdf_custom_sections !== null &&
+      !Array.isArray(settings.pdf_custom_sections) &&
+      typeof settings.pdf_custom_sections !== "string"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "pdf_custom_sections must be an array, JSON string, or null.",
+      });
+    }
+
+    if (typeof settings.pdf_custom_sections === "string") {
+      try {
+        const sections = JSON.parse(settings.pdf_custom_sections);
+        if (!Array.isArray(sections)) {
+          throw new Error("Custom sections must be an array.");
+        }
+        settings.pdf_custom_sections = sections;
+      } catch {
+        return res.status(400).json({
+          success: false,
+          message: "pdf_custom_sections must contain a valid JSON array.",
+        });
+      }
+    }
+
+    if (
+      settings.pdf_custom_sections &&
+      (settings.pdf_custom_sections.length > 50 ||
+        settings.pdf_custom_sections.some(
+          (section) =>
+            !section ||
+            typeof section !== "object" ||
+            Array.isArray(section) ||
+            (section.heading !== undefined &&
+              typeof section.heading !== "string") ||
+            (section.sub_text !== undefined &&
+              typeof section.sub_text !== "string")
+        ))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "pdf_custom_sections must contain at most 50 sections with string headings and text.",
+      });
     }
 
     if (
@@ -100,12 +178,7 @@ async function updateCompanySettings(req, res) {
       companySettings,
     });
   } catch (error) {
-    console.error("Update company settings error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to save company settings.",
-    });
+    return sendCompanySettingsError(res, error, "Update");
   }
 }
 

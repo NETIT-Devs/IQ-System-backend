@@ -1,7 +1,25 @@
+const fs = require("fs");
+const path = require("path");
 const PDFDocument = require("pdfkit");
 
 function formatMoney(value, currency) {
   return `${currency} ${Number(value || 0).toFixed(2)}`;
+}
+
+// Treat stored upload values as filenames and reject paths outside the upload folder.
+function resolveUploadedImage(imagePath) {
+  if (typeof imagePath !== "string" || !imagePath.trim()) {
+    return null;
+  }
+
+  const filename = path.basename(imagePath);
+  const uploadDirectory = path.resolve(__dirname, "..", "uploads");
+  const resolvedPath = path.resolve(uploadDirectory, filename);
+
+  return resolvedPath.startsWith(`${uploadDirectory}${path.sep}`) &&
+    fs.existsSync(resolvedPath)
+    ? resolvedPath
+    : null;
 }
 
 function createQuotationPdf(quotation, company = {}) {
@@ -15,6 +33,10 @@ function createQuotationPdf(quotation, company = {}) {
 
     const rightEdge = doc.page.width - 48;
     const currency = quotation.currency || "LKR";
+    const logoPath = resolveUploadedImage(company.company_logo);
+    const signaturePath = resolveUploadedImage(company.company_signature);
+    const companyX = logoPath ? 122 : 48;
+    const companyWidth = logoPath ? 230 : 280;
     const companyDetails = [
       company.company_address,
       company.contact_number,
@@ -25,37 +47,96 @@ function createQuotationPdf(quotation, company = {}) {
       .font("Helvetica-Bold")
       .fontSize(18)
       .fillColor("#17365D")
-      .text(company.company_name || "Company", 48, 48, { width: 280 });
+      .text(company.company_name || "Company", companyX, 48, {
+        width: companyWidth,
+      });
+    if (logoPath) {
+      try {
+        doc.image(logoPath, 48, 42, { fit: [64, 54] });
+      } catch (error) {
+        console.warn("Could not add company logo to quotation PDF:", error.message);
+      }
+    }
     doc.font("Helvetica").fontSize(9).fillColor("#4B5563");
     companyDetails.forEach((detail, index) => {
-      doc.text(String(detail), 48, 74 + index * 13, { width: 280 });
+      doc.text(String(detail), companyX, 74 + index * 13, {
+        width: companyWidth,
+      });
     });
 
+    const heading = company.pdf_heading || "QUOTATION";
+    const headingWidth = rightEdge - 300;
+    doc.font("Helvetica-Bold").fontSize(22);
+    const headingFontSize = Math.min(
+      22,
+      (22 * headingWidth) / doc.widthOfString(heading)
+    );
     doc
       .font("Helvetica-Bold")
-      .fontSize(22)
+      .fontSize(headingFontSize)
       .fillColor("#17365D")
-      .text("QUOTATION", 340, 48, { width: rightEdge - 340, align: "right" });
+      .text(heading, 300, 48, {
+        width: headingWidth,
+        align: "right",
+        lineBreak: false,
+      });
+    if (company.pdf_subheading) {
+      const subheading = String(company.pdf_subheading);
+      const subheadingWidth = rightEdge - 300;
+      doc.font("Helvetica").fontSize(9);
+      const subheadingFontSize = Math.min(
+        9,
+        (9 * subheadingWidth) / doc.widthOfString(subheading)
+      );
+      doc
+        .font("Helvetica")
+        .fontSize(subheadingFontSize)
+        .fillColor("#4B5563")
+        .text(subheading, 300, 75, {
+          width: subheadingWidth,
+          align: "right",
+          lineBreak: false,
+        });
+    }
     doc
       .font("Helvetica")
       .fontSize(10)
       .fillColor("#1F2937")
-      .text(`Quotation No: ${quotation.quotation_number}`, 300, 82, {
+      .text(`Quotation No: ${quotation.quotation_number}`, 300, 91, {
         width: rightEdge - 300,
         align: "right",
       })
-      .text(`Date: ${String(quotation.quotation_date).slice(0, 10)}`, 300, 98, {
+      .text(`Date: ${String(quotation.quotation_date).slice(0, 10)}`, 300, 107, {
         width: rightEdge - 300,
         align: "right",
       });
     if (quotation.valid_until) {
-      doc.text(`Valid Until: ${String(quotation.valid_until).slice(0, 10)}`, 300, 114, {
-        width: rightEdge - 300,
-        align: "right",
-      });
+      doc.text(
+        `Valid Until: ${String(quotation.valid_until).slice(0, 10)}`,
+        300,
+        123,
+        {
+          width: rightEdge - 300,
+          align: "right",
+        }
+      );
     }
 
-    let y = 150;
+    let y = 160;
+    if (company.pdf_custom_lines) {
+      const customLines = String(company.pdf_custom_lines)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      if (customLines.length > 0) {
+        y = Math.max(y, 140 + (customLines.length - 1) * 12);
+        doc.font("Helvetica").fontSize(9).fillColor("#4B5563");
+        customLines.forEach((line, index) => {
+          doc.text(line, 48, 140 + index * 12, { width: rightEdge - 48 });
+        });
+        y += 12;
+      }
+    }
     doc.moveTo(48, y).lineTo(rightEdge, y).lineWidth(1.5).stroke("#17365D");
     y += 18;
     doc.font("Helvetica-Bold").fontSize(11).fillColor("#17365D").text("PREPARED FOR", 48, y);
@@ -86,6 +167,7 @@ function createQuotationPdf(quotation, company = {}) {
     y += 24;
 
     doc.font("Helvetica").fontSize(9).fillColor("#1F2937");
+    // Start a new page before drawing a line item in the footer area.
     for (const [index, item] of (quotation.items || []).entries()) {
       if (y > 690) {
         doc.addPage();
@@ -103,10 +185,14 @@ function createQuotationPdf(quotation, company = {}) {
       doc.text(String(item.description || ""), columns.description, y + 8, {
         width: 165,
       });
-      doc.text(formatMoney(item.unit_price ?? item.Price, currency), columns.price, y + 8, {
-        width: 60,
-        align: "right",
-      });
+      doc.text(
+        item.price_text ||
+          item.unit_price_text ||
+          formatMoney(item.unit_price ?? item.Price, currency),
+        columns.price,
+        y + 8,
+        { width: 60, align: "right" }
+      );
       doc.text(`${Number(item.tax_rate || 0).toFixed(2)}%`, columns.tax, y + 8, {
         width: 35,
         align: "right",
@@ -142,7 +228,47 @@ function createQuotationPdf(quotation, company = {}) {
       y += 18;
     });
 
-    if (quotation.notes || quotation.terms_and_conditions) {
+    const customSections = Array.isArray(company.pdf_custom_sections)
+      ? company.pdf_custom_sections
+      : [];
+    for (const section of customSections) {
+      const heading = String(section?.heading || "").trim();
+      const body = String(section?.sub_text || "").trim();
+      if (!heading && !body) continue;
+
+      y += 10;
+      if (y > 690) {
+        doc.addPage();
+        y = 55;
+      }
+      if (heading) {
+        doc
+          .font("Helvetica-Bold")
+          .fontSize(10)
+          .fillColor("#17365D")
+          .text(heading, 48, y, { width: rightEdge - 48 });
+        y = doc.y + 4;
+      }
+      if (body) {
+        doc
+          .font("Helvetica")
+          .fontSize(9)
+          .fillColor("#1F2937")
+          .text(body, 48, y, { width: rightEdge - 48 });
+        y = doc.y + 6;
+      }
+    }
+
+    const terms =
+      quotation.terms_and_conditions ||
+      company.default_terms_and_conditions ||
+      "";
+    if (
+      quotation.notes ||
+      terms ||
+      company.pdf_footer_note ||
+      company.quotation_thank_you_message
+    ) {
       y += 12;
       if (y > 680) {
         doc.addPage();
@@ -159,7 +285,7 @@ function createQuotationPdf(quotation, company = {}) {
       y = doc.y + 10;
     }
 
-    if (quotation.terms_and_conditions) {
+    if (terms) {
       doc
         .font("Helvetica-Bold")
         .fontSize(10)
@@ -170,7 +296,58 @@ function createQuotationPdf(quotation, company = {}) {
         .font("Helvetica")
         .fontSize(9)
         .fillColor("#1F2937")
-        .text(quotation.terms_and_conditions, 48, y, { width: rightEdge - 48 });
+        .text(terms, 48, y, { width: rightEdge - 48 });
+      y = doc.y + 10;
+    }
+
+    for (const [label, value, bold] of [
+      ["", company.pdf_footer_note, false],
+      [company.quotation_thank_you_title || "Thank You", company.quotation_thank_you_message, true],
+      ["Prepared By", company.quotation_prepared_by, true],
+      ["", company.quotation_prepared_by_services, false],
+      ["", company.quotation_ceo_name, true],
+      ["", company.quotation_ceo_designation, false],
+    ]) {
+      if (!label && !value) continue;
+      if (y > 690) {
+        doc.addPage();
+        y = 55;
+      }
+      if (label) {
+        doc
+          .font("Helvetica-Bold")
+          .fontSize(10)
+          .fillColor("#17365D")
+          .text(label, 48, y, { width: rightEdge - 48 });
+        y = doc.y + 4;
+      }
+      if (value) {
+        doc
+          .font(bold ? "Helvetica-Bold" : "Helvetica")
+          .fontSize(9)
+          .fillColor("#1F2937")
+          .text(String(value), 48, y, { width: rightEdge - 48 });
+        y = doc.y + 6;
+      }
+    }
+
+    if (signaturePath && y < 700) {
+      try {
+        doc.image(signaturePath, rightEdge - 140, y, { fit: [130, 48] });
+        doc
+          .font("Helvetica")
+          .fontSize(8)
+          .fillColor("#4B5563")
+          .text("Authorized Signature", rightEdge - 140, y + 50, {
+            width: 130,
+            align: "center",
+          });
+      } catch (error) {
+        console.warn(
+          "Could not add company signature to quotation PDF:",
+          error.message
+        );
+      }
     }
 
     doc.end();

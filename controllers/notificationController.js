@@ -1,5 +1,6 @@
 const notificationModel = require("../models/notificationModel");
 
+// Notification operations are scoped to the authenticated user's account.
 async function listNotifications(req, res) {
   try {
     const notifications = await notificationModel.getNotifications(

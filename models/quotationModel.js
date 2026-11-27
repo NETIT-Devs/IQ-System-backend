@@ -3,6 +3,78 @@ const db = require("../config/db");
 const { createCustomer } = require("./customerModel");
 const { getPeriodCondition, normalizePeriod } = require("../utils/periodFilter");
 
+async function reserveNextQuotationNumber(connection, quotationDate) {
+  const dateMatch = /^(\d{4})-(\d{2})-\d{2}$/.exec(String(quotationDate || ""));
+  if (!dateMatch || Number(dateMatch[2]) < 1 || Number(dateMatch[2]) > 12) {
+    const error = new Error("A valid quotation date is required to generate its number.");
+    error.code = "INVALID_QUOTATION_DATE";
+    throw error;
+  }
+
+  const yearMonth = `${dateMatch[1].slice(2)}${dateMatch[2]}`;
+  const prefix = `QUO-${yearMonth}-`;
+  const lockName = `quotation-number-${yearMonth}`;
+  const [lockRows] = await connection.execute(
+    "SELECT GET_LOCK(?, 10) AS acquired",
+    [lockName]
+  );
+
+  if (Number(lockRows[0]?.acquired) !== 1) {
+    const error = new Error("Could not reserve a quotation number. Please retry.");
+    error.code = "QUOTATION_NUMBER_LOCK_TIMEOUT";
+    throw error;
+  }
+
+  try {
+    const [rows] = await connection.execute(
+      `SELECT COALESCE(
+         MAX(CAST(SUBSTRING(quotation_number, ?) AS UNSIGNED)),
+         0
+       ) AS max_sequence
+       FROM quotations
+       WHERE quotation_number LIKE ?
+         AND quotation_number REGEXP ?`,
+      [
+        prefix.length + 1,
+        `${prefix}%`,
+        `^QUO-${yearMonth}-[0-9]+$`,
+      ]
+    );
+    const nextSequence = Number(rows[0]?.max_sequence || 0) + 1;
+
+    return {
+      quotationNumber: `${prefix}${String(nextSequence).padStart(3, "0")}`,
+      lockName,
+    };
+  } catch (error) {
+    await connection.execute("SELECT RELEASE_LOCK(?)", [lockName]);
+    throw error;
+  }
+}
+
+async function getNextQuotationNumber(quotationDate) {
+  const connection = await db.getConnection();
+  let lockName;
+
+  try {
+    const generated = await reserveNextQuotationNumber(
+      connection,
+      quotationDate || new Date().toISOString().slice(0, 10)
+    );
+    lockName = generated.lockName;
+    return generated.quotationNumber;
+  } finally {
+    if (lockName) {
+      try {
+        await connection.execute("SELECT RELEASE_LOCK(?)", [lockName]);
+      } catch (error) {
+        console.error("Could not release quotation number lock:", error);
+      }
+    }
+    connection.release();
+  }
+}
+
 // Build quotation list filters.
 function buildQuotationFilters(filters = {}) {
   const conditions = [];
@@ -172,6 +244,20 @@ async function getAllQuotations(filters = {}) {
       q.rejection_reason,
       q.notes,
       q.terms_and_conditions,
+      q.work_completed,
+      q.work_completed_at,
+      q.work_completed_by,
+      CASE
+        WHEN linked_invoice.invoice_id IS NOT NULL THEN 1
+        ELSE 0
+      END AS is_invoiced,
+      linked_invoice.invoice_id,
+      linked_invoice.invoice_number,
+      CASE
+        WHEN q.work_completed = 1
+          AND linked_invoice.invoice_id IS NOT NULL THEN 1
+        ELSE 0
+      END AS is_work_completed,
       q.created_at,
       q.updated_at
     FROM quotations q
@@ -188,6 +274,14 @@ async function getAllQuotations(filters = {}) {
       GROUP BY quotation_id
     ) payment_totals
       ON payment_totals.quotation_id = q.quotation_id
+    LEFT JOIN (
+      SELECT quotation_id, MAX(invoice_id) AS invoice_id
+      FROM invoices
+      GROUP BY quotation_id
+    ) quotation_invoice
+      ON quotation_invoice.quotation_id = q.quotation_id
+    LEFT JOIN invoices linked_invoice
+      ON linked_invoice.invoice_id = quotation_invoice.invoice_id
     ${where}
     ORDER BY q.quotation_id DESC
     `,
@@ -217,6 +311,9 @@ async function getAllQuotations(filters = {}) {
     );
 
     quotation.items = items;
+    quotation.work_completed = Boolean(Number(quotation.work_completed));
+    quotation.is_invoiced = Boolean(Number(quotation.is_invoiced));
+    quotation.is_work_completed = Boolean(Number(quotation.is_work_completed));
   }
 
   return rows;
@@ -290,6 +387,20 @@ async function getQuotationById(quotationId, createdBy) {
       q.rejection_reason,
       q.notes,
       q.terms_and_conditions,
+      q.work_completed,
+      q.work_completed_at,
+      q.work_completed_by,
+      CASE
+        WHEN linked_invoice.invoice_id IS NOT NULL THEN 1
+        ELSE 0
+      END AS is_invoiced,
+      linked_invoice.invoice_id,
+      linked_invoice.invoice_number,
+      CASE
+        WHEN q.work_completed = 1
+          AND linked_invoice.invoice_id IS NOT NULL THEN 1
+        ELSE 0
+      END AS is_work_completed,
       q.created_at,
       q.updated_at
     FROM quotations q
@@ -306,6 +417,14 @@ async function getQuotationById(quotationId, createdBy) {
       GROUP BY quotation_id
     ) payment_totals
       ON payment_totals.quotation_id = q.quotation_id
+    LEFT JOIN (
+      SELECT quotation_id, MAX(invoice_id) AS invoice_id
+      FROM invoices
+      GROUP BY quotation_id
+    ) quotation_invoice
+      ON quotation_invoice.quotation_id = q.quotation_id
+    LEFT JOIN invoices linked_invoice
+      ON linked_invoice.invoice_id = quotation_invoice.invoice_id
     WHERE q.quotation_id = ?
       ${ownerCondition}
     LIMIT 1`,
@@ -340,8 +459,88 @@ async function getQuotationById(quotationId, createdBy) {
   );
 
   quotation.items = items;
+  quotation.work_completed = Boolean(Number(quotation.work_completed));
+  quotation.is_invoiced = Boolean(Number(quotation.is_invoiced));
+  quotation.is_work_completed = Boolean(Number(quotation.is_work_completed));
 
   return quotation;
+}
+
+async function setQuotationWorkCompletion(
+  quotationId,
+  completed,
+  userId,
+  createdBy
+) {
+  const connection = await db.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const ownerCondition =
+      createdBy === undefined || createdBy === null
+        ? ""
+        : "AND created_by = ?";
+    const ownerParams =
+      createdBy === undefined || createdBy === null ? [] : [createdBy];
+    const [quotations] = await connection.execute(
+      `SELECT quotation_id, work_completed
+       FROM quotations
+       WHERE quotation_id = ? ${ownerCondition}
+       FOR UPDATE`,
+      [quotationId, ...ownerParams]
+    );
+
+    if (quotations.length === 0) {
+      await connection.rollback();
+      return { updated: false, reason: "not_found" };
+    }
+
+    if (completed) {
+      const [invoices] = await connection.execute(
+        `SELECT invoice_id
+         FROM invoices
+         WHERE quotation_id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [quotationId]
+      );
+      if (invoices.length === 0) {
+        await connection.rollback();
+        return { updated: false, reason: "invoice_not_created" };
+      }
+    }
+
+    await connection.execute(
+      `UPDATE quotations
+       SET work_completed = ?,
+           work_completed_at = CASE
+             WHEN ? = 1 THEN COALESCE(work_completed_at, NOW())
+             ELSE NULL
+           END,
+           work_completed_by = CASE
+             WHEN ? = 1 THEN COALESCE(work_completed_by, ?)
+             ELSE NULL
+           END
+       WHERE quotation_id = ? ${ownerCondition}`,
+      [
+        completed ? 1 : 0,
+        completed ? 1 : 0,
+        completed ? 1 : 0,
+        completed ? userId : null,
+        quotationId,
+        ...ownerParams,
+      ]
+    );
+
+    await connection.commit();
+    return { updated: true };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 // Create quotation, customer (if needed), and quotation items atomically.
@@ -365,6 +564,7 @@ async function createQuotationWithItems(
     throw error;
   }
   const connection = await db.getConnection();
+  let quotationNumberLock;
 
   try {
     await connection.beginTransaction();
@@ -391,6 +591,13 @@ async function createQuotationWithItems(
           Boolean(quotation.duplicate_from_quotation_id),
       }
     );
+
+    const generatedNumber = await reserveNextQuotationNumber(
+      connection,
+      quotation.quotation_date
+    );
+    quotationNumberLock = generatedNumber.lockName;
+    quotation.quotation_number = generatedNumber.quotationNumber;
 
     const [result] = await connection.execute(
       `INSERT INTO quotations (
@@ -512,6 +719,15 @@ async function createQuotationWithItems(
     await connection.rollback();
     throw error;
   } finally {
+    if (quotationNumberLock) {
+      try {
+        await connection.execute("SELECT RELEASE_LOCK(?)", [
+          quotationNumberLock,
+        ]);
+      } catch (error) {
+        console.error("Could not release quotation number lock:", error);
+      }
+    }
     connection.release();
   }
 }
@@ -840,7 +1056,9 @@ async function deleteQuotationById(
 module.exports = {
   getAllQuotations,
   getQuotationById,
+  getNextQuotationNumber,
   createQuotationWithItems,
   updateQuotationWithItems,
+  setQuotationWorkCompletion,
   deleteQuotationById,
 };
